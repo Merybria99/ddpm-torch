@@ -89,6 +89,7 @@ def generate(rank, args, counter=0):
         del state_dict
         print("succeeded!")
     except RuntimeError:
+        model.load_state_dict(state_dict)
         print("failed!")
         exit(1)
 
@@ -176,3 +177,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+"""
+command lines for launching generation:
+- python generate.py --config-path /home/maria.briglia/AdvTrain/ddpm-torch/configs/cifar10.json --dataset cifar10 --total-size 50000  --use-ema --chkpt-path /home/maria.briglia/data/ddpm-train/chkpts/cifar10/cifar10_480.pt  --save-dir /home/maria.briglia/data/ddpm-train/cifar10-images --batch-size 512
+
+"""

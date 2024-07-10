@@ -11,10 +11,34 @@ from functools import partial
 from torch.distributed.elastic.multiprocessing import errors
 from torch.nn.parallel import DistributedDataParallel as DDP  # noqa
 from torch.optim import Adam, lr_scheduler
+import wandb
 
+model_instanciations = {
+    "unet": UNet,
+    "unet2h": UNet2H,
+}
 
 def train(rank=0, args=None, temp_dir=""):
     distributed = args.distributed
+    
+    
+    #####################  SETTING UP THE ENVIRONMENT  #####################
+    
+    base_dir = args.root
+    os.environ["WANDB_API_KEY"] = "a1a7558f7c28b7f2e2c6d3ed712301e302531570"
+    os.environ["USERNAME"] = "mariarosaria-briglia"
+    os.environ["MPLCONFIGDIR"] = f"{base_dir}/.cache/matplotlib"
+    os.environ["TRANSFORMERS_CACHE"] = f"{base_dir}/.cache/huggingface/hub"
+    os.environ["HF_HOME"] = f"{base_dir}/.cache/huggingface/hub"
+    os.environ["PYTORCH_KERNEL_CACHE_PATH"] = f"{base_dir}/.cache"
+    os.environ["WANDB_CACHE_DIR"] = f"{base_dir}/.cache/wandb"
+    os.environ["WANDB_DIR"] = f"{base_dir}/.cache/wandb"
+    torch.hub.set_dir(f"{base_dir}/.cache")
+    
+    # Initialize wandb
+    exp_name = ''.join([args.exp_name, '-', datetime.now().strftime("%Y-%m-%dT%H%M%S%f")])
+        
+    #####################  TRAINING CONFIG  #####################
 
     def logger(msg, **kwargs):
         if not distributed or dist.get_rank() == 0:
@@ -65,13 +89,19 @@ def train(rank=0, args=None, temp_dir=""):
     block_size = model_config.pop("block_size", args.block_size)
     model_config["in_channels"] = in_channels * block_size ** 2
     model_config["out_channels"] = out_channels * block_size ** 2
-    _model = UNet(**model_config)
-
+           
+    #####################  MODEL SETUP  #####################
+    try:
+        _model = model_instanciations[args.architecture](**model_config)
+    except KeyError:
+        raise ValueError(f"Model architecture {args.architecture} is not supported!")
+        
     if block_size > 1:
         pre_transform = torch.nn.PixelUnshuffle(block_size)  # space-to-depth
         post_transform = torch.nn.PixelShuffle(block_size)  # depth-to-space
         _model = ModelWrapper(_model, pre_transform, post_transform)
 
+    #####################  HANDLE MULTI-GPU TRAINING  #####################
     if distributed:
         # check whether torch.distributed is available
         # CUDA devices are required to run with NCCL backend
@@ -171,7 +201,19 @@ def train(rank=0, args=None, temp_dir=""):
             json.dump(hps, f, indent=2)
         if not os.path.exists(image_dir):
             os.makedirs(image_dir)
+            
+    wandb_config_dict = {
+        "dataset": dataset,
+        "seed": seed,
+        "diffusion": diffusion_config,
+        "model": model_config,
+        "train": train_config, 
+        "adv_percentage": args.adv_percentage,
+        "architecture": args.architecture,        
+    }
 
+    wandb.init(project="ddpm-cifar10", name=exp_name, config=wandb_config_dict) 
+    
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
@@ -191,7 +233,10 @@ def train(rank=0, args=None, temp_dir=""):
         ema_decay=args.ema_decay,
         rank=rank,
         distributed=distributed,
-        dry_run=args.dry_run
+        dry_run=args.dry_run, 
+        
+        adv_percentage=args.adv_percentage,
+        model_architecture = args.architecture,
     )
 
     if args.use_ddim:
@@ -262,7 +307,7 @@ def main():
     parser.add_argument("--image-intv", default=10, type=int)
     parser.add_argument("--num-samples", default=64, type=int, help="number of images to sample and save")
     parser.add_argument("--config-dir", default="./configs", type=str)
-    parser.add_argument("--chkpt-dir", default="./chkpts", type=str)
+    parser.add_argument("--chkpt-dir", default="/home/maria.briglia/data/ddpm-train/chkpts", type=str)
     parser.add_argument("--chkpt-name", default="", type=str)
     parser.add_argument("--chkpt-intv", default=120, type=int, help="frequency of saving a checkpoint")
     parser.add_argument("--seed", default=1234, type=int, help="random seed")
@@ -281,8 +326,11 @@ def main():
     parser.add_argument("--num-gpus", default=1, type=int, help="number of gpus for distributed training")
     parser.add_argument("--dry-run", action="store_true", help="test-run till the first model update completes")
 
+    parser.add_argument("--adv-percentage", default=0, type=float, help="percentage of adversarial examples in the training procedure")
+    parser.add_argument("--architecture", default="unet", type=str, choices = model_instanciations.keys() ,help="model architecture to use")
+    
     args = parser.parse_args()
-
+    
     if args.distributed and args.rigid_launch:
         mp.set_start_method("spawn")
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -303,3 +351,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+"""
+commands to launch training :
+- clean training:
+python train.py --dataset cifar10 --root /home/maria.briglia/data/ddpm-train --adv-percentage 0 --exp-name flag
+
+- adv training with 100% adversarial examples:
+python train.py --dataset cifar10 --chkpt-intv 10 --root /home/maria.briglia/data/adv-ddpm-train --exp-name adv-flag --chkpt-dir /home/maria.briglia/data/adv-ddpm-train/chkpts --adv-percentage 1 --image-dir /home/maria.briglia/data/adv-ddpm-train/images
+"""

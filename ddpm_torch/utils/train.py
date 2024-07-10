@@ -11,6 +11,7 @@ import weakref
 from tqdm import tqdm
 from functools import partial
 from contextlib import nullcontext
+import wandb
 
 
 class DummyScheduler:
@@ -58,31 +59,33 @@ class RunningStatistics:
         return out_str.format(self.count, **self.stats)
 
 
-save_image = partial(_save_image, normalize=True, value_range=(-1., 1.))
+save_image = partial(_save_image, normalize=True, value_range=(-1.0, 1.0))
 
 
 class Trainer:
     def __init__(
-            self,
-            model,
-            optimizer,
-            diffusion,
-            epochs,
-            trainloader,
-            sampler=None,
-            scheduler=None,
-            num_accum=1,
-            use_ema=False,
-            grad_norm=1.0,
-            shape=None,
-            device=torch.device("cpu"),
-            chkpt_intv=5,
-            image_intv=1,
-            num_samples=64,
-            ema_decay=0.9999,
-            distributed=False,
-            rank=0,  # process id for distributed training
-            dry_run=False
+        self,
+        model,
+        optimizer,
+        diffusion,
+        epochs,
+        trainloader,
+        sampler=None,
+        scheduler=None,
+        num_accum=1,
+        use_ema=False,
+        grad_norm=1.0,
+        shape=None,
+        device=torch.device("cpu"),
+        chkpt_intv=5,
+        image_intv=1,
+        num_samples=64,
+        ema_decay=0.9999,
+        distributed=False,
+        rank=0,  # process id for distributed training
+        dry_run=False,
+        adv_percentage=0.0,
+        model_architecture="unet",
     ):
         self.model = model
         self.optimizer = optimizer
@@ -127,29 +130,105 @@ class Trainer:
 
         self.stats = RunningStatistics(loss=None)
 
+        self.adv_percentage = adv_percentage
+        self.model_architecture = model_architecture
+
     @property
     def timesteps(self):
         return self.diffusion.timesteps
 
     def get_input(self, x):
         x = x.to(self.device)
-        return {
-            "x_0": x,
-            "t": torch.empty((x.shape[0],), dtype=torch.int64, device=self.device).random_(
-                to=self.timesteps, generator=self.generator),
-            "noise": torch.empty_like(x).normal_(generator=self.generator)
-        }
 
-    def loss(self, x):
-        loss = self.diffusion.train_losses(self.model, **self.get_input(x))
+        input_dict = {
+            "x_0": x,
+            "t": torch.empty(
+                (x.shape[0],), dtype=torch.int64, device=self.device
+            ).random_(to=self.timesteps, generator=self.generator),
+            "noise": torch.empty_like(x).normal_(generator=self.generator),
+            "delta": torch.zeros_like(x, dtype=torch.float32, device=self.device),
+        }
+        return input_dict
+
+    def loss(self, x, inputs=None):
+        if inputs is None:
+            inputs = self.get_input(x)
+
+        if self.model_architecture == "unet":
+            inputs["delta"] = None            
+
+        loss = self.diffusion.train_losses(self.model, **inputs )
         assert loss.shape == (x.shape[0],)
         return loss
 
-    def step(self, x, global_steps=1):
-        # Note: For DDP models, the gradients collected from different devices are averaged rather than summed.
-        # See https://pytorch.org/docs/1.12/generated/torch.nn.parallel.DistributedDataParallel.html
-        # Mean-reduced loss should be used to avoid inconsistent learning rate issue when number of devices changes.
-        loss = self.loss(x).mean()
+    def step(self, x, global_steps=1, adv_percentage=1, epsilon=8 / 255):
+        import random as r
+
+        rand_val = r.random()
+
+        if rand_val <= adv_percentage:
+            # print("attack")
+
+            # get inputs for inference
+            inputs = self.get_input(x)
+            x0, timesteps, noise, delta = inputs["x_0"], inputs["t"], inputs["noise"], inputs["delta"]
+
+            self.model.eval()
+            
+            x_adv = x.clone().detach().requires_grad_(False) + delta.requires_grad_(True)
+            x_adv = x_adv.float()
+
+            sqrt_alpha_prod = self.diffusion.alphas_bar.to(timesteps.device)
+            sqrt_alpha_prod = sqrt_alpha_prod[timesteps] ** 0.5
+            sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+            while len(sqrt_alpha_prod.shape) < len(x0.shape):
+                sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
+            sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+
+            sqrt_one_minus_alpha_prod = (
+                1 - self.diffusion.alphas_bar.to(timesteps.device)[timesteps]
+            ) ** 0.5
+            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+            while len(sqrt_one_minus_alpha_prod.shape) < len(x0.shape):
+                sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(
+                    -1
+                )  # [128,1,1,1]
+            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+
+            epsilon = epsilon / sqrt_one_minus_alpha_prod  # [128]
+
+            with torch.enable_grad():
+                # the function loss calls the following functions :
+                # - train losses ->
+                #        - noisies the sample with the passed noise
+                #        - generates a noisy sample made as sqrt(alpha_ba)*x0 + (1-sqrt(alpha_bar)) * noise
+                inputs["x_0"] = x_adv
+                clean_loss = self.loss(x_adv, inputs=inputs).mean()
+
+            grad = torch.autograd.grad(clean_loss, delta)[0]
+           
+            delta.data = (
+                delta.clone().detach()
+                + (grad.detach().sign()) * epsilon.view(-1, 1, 1, 1).expand_as(grad)
+            ).float()
+
+            x_adv = x.clone().detach().requires_grad_(False) + delta
+
+            self.model.train()
+
+            # update inputs for training
+            inputs["x_0"] = x
+            inputs["noise"] = (
+                noise + delta if self.model_architecture == "unet" else noise
+            )
+            if self.model_architecture == "unet2h":
+                inputs["delta"] = delta
+
+            loss = self.loss(x, inputs=inputs).mean()
+            # print(f"clean_loss: {clean_loss.item()},\n adv_loss: {loss.item()}")
+        else:
+            loss = self.loss(x).mean()
+
         loss.div(self.num_accum).backward()  # average over accumulated mini-batches
         if global_steps % self.num_accum == 0:
             # gradient clipping by global norm
@@ -178,11 +257,18 @@ class Trainer:
             diffusion = self.diffusion
         with self.ema:
             sample = diffusion.p_sample(
-                denoise_fn=self.model, shape=shape,
-                device=self.device, noise=noise, seed=sample_seed)
+                denoise_fn=self.model,
+                shape=shape,
+                device=self.device,
+                noise=noise,
+                seed=sample_seed,
+                architecture=self.model_architecture,
+            )
         if self.distributed:
             # equalizes GPU memory usages across all processes within the same process group
-            sample_list = [torch.zeros(shape, device=self.device) for _ in range(self.world_size)]
+            sample_list = [
+                torch.zeros(shape, device=self.device) for _ in range(self.world_size)
+            ]
             dist.all_gather(sample_list, sample)
             sample = torch.cat(sample_list, dim=0)
         assert sample.grad is None
@@ -191,7 +277,9 @@ class Trainer:
     def train(self, evaluator=None, chkpt_path=None, image_dir=None):
         nrow = math.floor(math.sqrt(self.num_samples))
         if self.num_samples:
-            assert self.num_samples % self.world_size == 0, "Number of samples should be divisible by WORLD_SIZE!"
+            assert (
+                self.num_samples % self.world_size == 0
+            ), "Number of samples should be divisible by WORLD_SIZE!"
 
         if self.dry_run:
             self.start_epoch, self.epochs = 0, 1
@@ -203,27 +291,40 @@ class Trainer:
             results = dict()
             if isinstance(self.sampler, DistributedSampler):
                 self.sampler.set_epoch(e)
-            with tqdm(self.trainloader, desc=f"{e + 1}/{self.epochs} epochs", disable=not self.is_leader) as t:
+            with tqdm(
+                self.trainloader,
+                desc=f"{e + 1}/{self.epochs} epochs",
+                disable=not self.is_leader,
+            ) as t:
                 for i, x in enumerate(t):
                     if isinstance(x, (list, tuple)):
                         x = x[0]  # unconditional model -> discard labels
                     global_steps += 1
-                    self.step(x.to(self.device), global_steps=global_steps)
+                    self.step(
+                        x.to(self.device),
+                        global_steps=global_steps,
+                        adv_percentage=self.adv_percentage,
+                    )
                     t.set_postfix(self.current_stats)
                     results.update(self.current_stats)
+
                     if self.dry_run and not global_steps % self.num_accum:
                         break
 
             if not (e + 1) % self.image_intv and self.num_samples and image_dir:
                 self.model.eval()
-                x = self.sample_fn(sample_size=self.num_samples, sample_seed=self.sample_seed).cpu()
+                x = self.sample_fn(
+                    sample_size=self.num_samples, sample_seed=self.sample_seed
+                ).cpu()
                 if self.is_leader:
                     save_image(x, os.path.join(image_dir, f"{e + 1}.jpg"), nrow=nrow)
 
             if not (e + 1) % self.chkpt_intv and chkpt_path:
                 self.model.eval()
                 if evaluator is not None:
-                    eval_results = evaluator.eval(self.sample_fn, is_leader=self.is_leader)
+                    eval_results = evaluator.eval(
+                        self.sample_fn, is_leader=self.is_leader
+                    )
                 else:
                     eval_results = dict()
                 results.update(eval_results)
@@ -232,6 +333,7 @@ class Trainer:
 
             if self.distributed:
                 dist.barrier()  # synchronize all processes here
+            wandb.log(results)
 
     @property
     def trainees(self):
@@ -252,7 +354,9 @@ class Trainer:
             try:
                 getattr(self, trainee).load_state_dict(chkpt[trainee])
             except RuntimeError:
-                _chkpt = chkpt[trainee]["shadow"] if trainee == "ema" else chkpt[trainee]
+                _chkpt = (
+                    chkpt[trainee]["shadow"] if trainee == "ema" else chkpt[trainee]
+                )
                 for k in list(_chkpt.keys()):
                     if k.startswith("module."):
                         _chkpt[k.split(".", maxsplit=1)[1]] = _chkpt.pop(k)
@@ -262,13 +366,17 @@ class Trainer:
         self.start_epoch = chkpt["epoch"]
 
     def save_checkpoint(self, chkpt_path, **extra_info):
+
         chkpt = []
         for k, v in self.named_state_dicts():
             chkpt.append((k, v))
         for k, v in extra_info.items():
             chkpt.append((k, v))
         if "epoch" in extra_info:
-            chkpt_path = re.sub(r"(_\d+)?\.pt", f"_{extra_info['epoch']}.pt", chkpt_path)
+            chkpt_path = re.sub(
+                r"(_\d+)?\.pt", f"_{extra_info['epoch']}.pt", chkpt_path
+            )
+        print(f"Saving checkpoint to {chkpt_path}")
         torch.save(dict(chkpt), chkpt_path)
 
     def named_state_dicts(self):
@@ -305,8 +413,9 @@ class EMA:
             self.shadow[k] += (1 - decay) * (_ref().data - self.shadow[k])
 
     def apply(self):
-        self.backup = dict([
-            (k, _ref().detach().clone()) for k, _ref in self._refs.items()])
+        self.backup = dict(
+            [(k, _ref().detach().clone()) for k, _ref in self._refs.items()]
+        )
         for k, _ref in self._refs.items():
             _ref().data.copy_(self.shadow[k])
 
@@ -325,7 +434,7 @@ class EMA:
         return {
             "decay": self.decay,
             "shadow": self.shadow,
-            "num_updates": self.num_updates
+            "num_updates": self.num_updates,
         }
 
     @property
@@ -335,8 +444,11 @@ class EMA:
     def load_state_dict(self, state_dict, strict=True):
         _dict_keys = set(self.__dict__["shadow"]).union(self.extra_states)
         dict_keys = set(state_dict["shadow"]).union(self.extra_states)
-        incompatible_keys = set.symmetric_difference(_dict_keys, dict_keys) \
-            if strict else set.difference(_dict_keys, dict_keys)
+        incompatible_keys = (
+            set.symmetric_difference(_dict_keys, dict_keys)
+            if strict
+            else set.difference(_dict_keys, dict_keys)
+        )
         if incompatible_keys:
             raise RuntimeError(
                 "Key mismatch!\n"
@@ -347,12 +459,7 @@ class EMA:
 
 
 class ModelWrapper(nn.Module):
-    def __init__(
-            self,
-            model,
-            pre_transform=None,
-            post_transform=None
-    ):
+    def __init__(self, model, pre_transform=None, post_transform=None):
         super().__init__()
         self._model = model
         self.pre_transform = pre_transform

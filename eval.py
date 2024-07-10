@@ -83,6 +83,7 @@ if __name__ == "__main__":
         istats = InceptionStatistics(device=model_device, input_transform=lambda im: (im-127.5) / 127.5)
         try:
             true_mean, true_var = get_precomputed(dataset, download_dir=precomputed_dir)
+            true_mean, true_var = istats.get_statistics()
         except Exception:
             print("Precomputed statistics cannot be loaded! Computing from raw data...")
             dataloader = get_dataloader(
@@ -91,6 +92,7 @@ if __name__ == "__main__":
             for x in tqdm(dataloader):
                 istats(x.to(input_device))
             true_mean, true_var = istats.get_statistics()
+            print(f"True mean: {true_mean}, True variance: {true_var}")
             np.savez(os.path.join(precomputed_dir, f"fid_stats_{dataset}.npz"), mu=true_mean, sigma=true_var)
         istats.reset()
         for x in tqdm(imageloader, desc="Computing Inception statistics"):

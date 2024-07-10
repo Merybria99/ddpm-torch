@@ -89,7 +89,7 @@ class ResidualBlock(nn.Module):
         return x + skip
 
 
-class UNet(nn.Module):
+class UNet2H(nn.Module):
     normalize = DEFAULT_NORMALIZER
     nonlinearity = DEFAULT_NONLINEARITY
 
@@ -105,9 +105,8 @@ class UNet(nn.Module):
             drop_rate=0.,
             resample_with_conv=True
     ):
-        super(UNet, self).__init__()
-        print("model used : UNet")
-        
+        super(UNet2H, self).__init__()
+        print("model used : UNet2H")
         self.in_channels = in_channels
         self.hid_channels = hid_channels
         self.out_channels = out_channels
@@ -142,7 +141,12 @@ class UNet(nn.Module):
             self.nonlinearity,
             Conv2d(hid_channels, out_channels, 3, 1, 1, init_scale=0.)
         )
-
+        self.out_conv_delta = Sequential(
+            self.normalize(hid_channels),
+            self.nonlinearity,
+            Conv2d(hid_channels, out_channels, 3, 1, 1, init_scale=0.)
+        )
+        
     def _get_block_by_level(self, level):
         block_kwargs = {"embed_dim": self.time_embedding_dim, "drop_rate": self.drop_rate}
         if self.apply_attn[level]:
@@ -231,12 +235,14 @@ class UNet(nn.Module):
                 else:
                     h = layer(h)
 
-        h = self.out_conv(h)
-        return h
+        pred_noise = self.out_conv(h)
+        pred_delta = self.out_conv_delta(h)
+        return pred_noise, pred_delta
 
 
 if __name__ == "__main__":
-    model = UNet(3, 128, 3, (1, 2, 3), 2, (False, True, False))
+    model = UNet2H(3, 128, 3, (1, 2, 3), 2, (False, True, False))
     print(model)
-    out = model(torch.randn(16, 3, 32, 32), t=torch.randint(1000, size=(16, )))
-    print(out.shape)
+    epsilon, delta = model(torch.randn(16, 3, 32, 32), t=torch.randint(1000, size=(16, )))
+    print("epsilon shape",epsilon.shape)
+    print("delta shape",delta.shape)
