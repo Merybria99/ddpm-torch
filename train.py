@@ -202,17 +202,6 @@ def train(rank=0, args=None, temp_dir=""):
         if not os.path.exists(image_dir):
             os.makedirs(image_dir)
             
-    wandb_config_dict = {
-        "dataset": dataset,
-        "seed": seed,
-        "diffusion": diffusion_config,
-        "model": model_config,
-        "train": train_config, 
-        "adv_percentage": args.adv_percentage,
-        "architecture": args.architecture,        
-    }
-
-    wandb.init(project="ddpm-cifar10", name=exp_name, config=wandb_config_dict) 
     
     trainer = Trainer(
         model=model,
@@ -236,7 +225,8 @@ def train(rank=0, args=None, temp_dir=""):
         dry_run=args.dry_run, 
         
         adv_percentage=args.adv_percentage,
-        model_architecture = args.architecture,
+        model_architecture = args.architecture,        
+        attack_norm = args.attack_norm if args.adv_percentage > 0 else None,
     )
 
     if args.use_ddim:
@@ -272,6 +262,24 @@ def train(rank=0, args=None, temp_dir=""):
     if torch.backends.cudnn.is_available():  # noqa
         torch.backends.cudnn.benchmark = True  # noqa
         logger(f"cuDNN benchmark: ON")
+        
+        
+    wandb_config_dict = {
+        "dataset": dataset,
+        "seed": seed,
+        "diffusion": diffusion_config,
+        "model": model_config,
+        "train": train_config, 
+        "adv_percentage": args.adv_percentage,
+        "architecture": args.architecture,   
+        "attack norm" : args.attack_norm,      
+    }
+    if resume :
+        wandb_run_id = args.wandb_id
+        wandb.init(project="ddpm-cifar10", name=exp_name, config=wandb_config_dict, resume='allow', id=wandb_run_id) 
+    else:
+        wandb.init(project="ddpm-cifar10", name=exp_name, config=wandb_config_dict)
+    wandb.watch(model)
 
     logger("Training starts...", flush=True)
     trainer.train(evaluator, chkpt_path=chkpt_path, image_dir=image_dir)
@@ -307,7 +315,7 @@ def main():
     parser.add_argument("--image-intv", default=10, type=int)
     parser.add_argument("--num-samples", default=64, type=int, help="number of images to sample and save")
     parser.add_argument("--config-dir", default="./configs", type=str)
-    parser.add_argument("--chkpt-dir", default="/home/maria.briglia/data/ddpm-train/chkpts", type=str)
+    parser.add_argument("--chkpt-dir", type=str)
     parser.add_argument("--chkpt-name", default="", type=str)
     parser.add_argument("--chkpt-intv", default=120, type=int, help="frequency of saving a checkpoint")
     parser.add_argument("--seed", default=1234, type=int, help="random seed")
@@ -328,7 +336,8 @@ def main():
 
     parser.add_argument("--adv-percentage", default=0, type=float, help="percentage of adversarial examples in the training procedure")
     parser.add_argument("--architecture", default="unet", type=str, choices = model_instanciations.keys() ,help="model architecture to use")
-    
+    parser.add_argument("--attack-norm", default="inf", type=str, choices=["inf", "2"], help="norm to use for the adversarial attack")
+    parser.add_argument("--wandb-id", default=None, type=str, help="wandb id to resume a run")
     args = parser.parse_args()
     
     if args.distributed and args.rigid_launch:
@@ -356,7 +365,7 @@ if __name__ == "__main__":
 """
 commands to launch training :
 - clean training:
-python train.py --dataset cifar10 --root /home/maria.briglia/data/ddpm-train --adv-percentage 0 --exp-name flag
+python train.py --dataset cifar10 --root /home/maria.briglia/data/ddpm-train --adv-percentage 0 --exp-name flag --chkpt-dir /home/maria.briglia/data/ddpm-train/chkpt-dir/non-robust --image-dir /home/maria.briglia/data/ddpm-train/images
 
 - adv training with 100% adversarial examples:
 python train.py --dataset cifar10 --chkpt-intv 10 --root /home/maria.briglia/data/adv-ddpm-train --exp-name adv-flag --chkpt-dir /home/maria.briglia/data/adv-ddpm-train/chkpts --adv-percentage 1 --image-dir /home/maria.briglia/data/adv-ddpm-train/images

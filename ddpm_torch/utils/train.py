@@ -86,6 +86,7 @@ class Trainer:
         dry_run=False,
         adv_percentage=0.0,
         model_architecture="unet",
+        attack_norm="inf",
     ):
         self.model = model
         self.optimizer = optimizer
@@ -130,8 +131,9 @@ class Trainer:
 
         self.stats = RunningStatistics(loss=None)
 
-        self.adv_percentage = adv_percentage
-        self.model_architecture = model_architecture
+        self.adv_percentage = adv_percentage  # percentage of adversarial examples
+        self.model_architecture = model_architecture  # architecture of the model, is None if the attack si not performed
+        self.attack_norm = attack_norm  # norm of the attack
 
     @property
     def timesteps(self):
@@ -155,9 +157,11 @@ class Trainer:
             inputs = self.get_input(x)
 
         if self.model_architecture == "unet":
-            inputs["delta"] = None            
+            inputs["delta"] = None
+        
+        
 
-        loss = self.diffusion.train_losses(self.model, **inputs )
+        loss = self.diffusion.train_losses(self.model, **inputs)
         assert loss.shape == (x.shape[0],)
         return loss
 
@@ -166,51 +170,52 @@ class Trainer:
 
         rand_val = r.random()
 
+        # get inputs for inference
+        inputs = self.get_input(x)
+        x0, timesteps, noise, delta = (
+            inputs["x_0"],
+            inputs["t"],
+            inputs["noise"],
+            inputs["delta"],  # delta is always 0 at the beginning
+        )
+
         if rand_val <= adv_percentage:
             # print("attack")
 
-            # get inputs for inference
-            inputs = self.get_input(x)
-            x0, timesteps, noise, delta = inputs["x_0"], inputs["t"], inputs["noise"], inputs["delta"]
-
             self.model.eval()
-            
-            x_adv = x.clone().detach().requires_grad_(False) + delta.requires_grad_(True)
-            x_adv = x_adv.float()
 
-            sqrt_alpha_prod = self.diffusion.alphas_bar.to(timesteps.device)
-            sqrt_alpha_prod = sqrt_alpha_prod[timesteps] ** 0.5
-            sqrt_alpha_prod = sqrt_alpha_prod.flatten()
-            while len(sqrt_alpha_prod.shape) < len(x0.shape):
-                sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
-            sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+            x_adv = (
+                x.clone().detach().requires_grad_(False) + delta.requires_grad_(True)
+            ).float()
 
-            sqrt_one_minus_alpha_prod = (
-                1 - self.diffusion.alphas_bar.to(timesteps.device)[timesteps]
-            ) ** 0.5
-            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
-            while len(sqrt_one_minus_alpha_prod.shape) < len(x0.shape):
-                sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(
-                    -1
-                )  # [128,1,1,1]
-            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+            _, sqrt_one_minus_alpha_prod = self.get_scales(x0, timesteps)
 
-            epsilon = epsilon / sqrt_one_minus_alpha_prod  # [128]
+            epsilon = epsilon / sqrt_one_minus_alpha_prod
 
             with torch.enable_grad():
-                # the function loss calls the following functions :
-                # - train losses ->
-                #        - noisies the sample with the passed noise
-                #        - generates a noisy sample made as sqrt(alpha_ba)*x0 + (1-sqrt(alpha_bar)) * noise
+                """the function loss calls the following functions :
+                - train losses ->
+                        - noisies the sample with the passed noise
+                        - generates a noisy sample made as sqrt(alpha_ba)*x0 + (1-sqrt(alpha_bar)) * noise
+                
+                """
                 inputs["x_0"] = x_adv
                 clean_loss = self.loss(x_adv, inputs=inputs).mean()
 
             grad = torch.autograd.grad(clean_loss, delta)[0]
-           
-            delta.data = (
-                delta.clone().detach()
-                + (grad.detach().sign()) * epsilon.view(-1, 1, 1, 1).expand_as(grad)
-            ).float()
+
+            if self.attack_norm == "inf":
+                delta.data = (
+                    delta.clone().detach()
+                    + (grad.detach().sign()) * epsilon.view(-1, 1, 1, 1).expand_as(grad)
+                ).float()
+
+            elif self.attack_norm == "2":
+                delta.data = (
+                    delta.clone().detach()
+                    + (grad.detach() / grad.detach().norm())
+                    * epsilon.view(-1, 1, 1, 1).expand_as(grad)
+                ).float()
 
             x_adv = x.clone().detach().requires_grad_(False) + delta
 
@@ -248,6 +253,38 @@ class Trainer:
             loss.div_(self.world_size)
         self.stats.update(x.shape[0], loss=loss.item() * x.shape[0])
 
+    def get_scales(self, x0, timesteps):
+        """The function returns the scales for the diffusion process at
+        the given timesteps and with a compatible shape with x0
+
+        Keyword arguments:
+        x0 -- the input tensor
+        timesteps -- the timesteps at which the scales are computed
+
+        Return:
+        sqrt_alpha_prod -- the square root of the product of the alpha values
+        sqrt_one_minus_alpha_prod -- the square root of the product of the one minus alpha values
+
+        """
+
+        sqrt_alpha_prod = self.diffusion.alphas_bar.to(timesteps.device)
+        sqrt_alpha_prod = sqrt_alpha_prod[timesteps] ** 0.5
+        sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+        while len(sqrt_alpha_prod.shape) < len(x0.shape):
+            sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
+        sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+
+        sqrt_one_minus_alpha_prod = (
+            1 - self.diffusion.alphas_bar.to(timesteps.device)[timesteps]
+        ) ** 0.5
+        sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+        while len(sqrt_one_minus_alpha_prod.shape) < len(x0.shape):
+            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(
+                -1
+            )  # [x0.shape[0],1,1,1]
+        sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+        return sqrt_alpha_prod, sqrt_one_minus_alpha_prod
+
     def sample_fn(self, sample_size=None, noise=None, diffusion=None, sample_seed=None):
         if noise is None:
             shape = (sample_size // self.world_size,) + self.shape
@@ -262,7 +299,6 @@ class Trainer:
                 device=self.device,
                 noise=noise,
                 seed=sample_seed,
-                architecture=self.model_architecture,
             )
         if self.distributed:
             # equalizes GPU memory usages across all processes within the same process group
@@ -333,6 +369,7 @@ class Trainer:
 
             if self.distributed:
                 dist.barrier()  # synchronize all processes here
+
             wandb.log(results)
 
     @property

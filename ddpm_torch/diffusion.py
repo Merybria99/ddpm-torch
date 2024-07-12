@@ -121,9 +121,21 @@ class GaussianDiffusion:
         return posterior_mean, posterior_var, posterior_logvar
 
     def p_mean_var(self, denoise_fn, x_t, t, clip_denoised, return_pred):
-        B, C, H, W = x_t.shape
-        out = denoise_fn(x_t, t)
+        architecture = (
+            denoise_fn.architecture_name
+            if hasattr(denoise_fn, "architecture_name")
+            else "unet"
+        )
 
+        B, C, H, W = x_t.shape
+        if architecture == "unet":
+            out = denoise_fn(x_t, t)
+        elif architecture == "unet2h":
+            out, delta = denoise_fn(x_t, t)
+            out = out + delta
+        else:
+            raise NotImplementedError(architecture)
+                
         if self.model_var_type == "learned":
             assert all(out.shape == (B, 2 * C, H, W))
             out, model_logvar = out.chunk(2, dim=1)
@@ -174,10 +186,13 @@ class GaussianDiffusion:
         clip_denoised=True,
         return_pred=False,
         generator=None,
-        architecture="unet",
     ):
         model_mean, _, model_logvar, pred_x_0 = self.p_mean_var(
-            denoise_fn, x_t, t, clip_denoised=clip_denoised, return_pred=True
+            denoise_fn,
+            x_t,
+            t,
+            clip_denoised=clip_denoised,
+            return_pred=True,
         )
         noise = torch.empty_like(x_t).normal_(generator=generator)
         nonzero_mask = (t > 0).reshape((-1,) + (1,) * (x_t.ndim - 1)).to(x_t)
@@ -192,7 +207,6 @@ class GaussianDiffusion:
         device=torch.device("cpu"),
         noise=None,
         seed=None,
-        architecture="unet",
     ):
         B = (shape or noise.shape)[0]
         t = torch.empty((B,), dtype=torch.int64, device=device)
@@ -206,7 +220,7 @@ class GaussianDiffusion:
         for ti in range(self.timesteps - 1, -1, -1):
             t.fill_(ti)
             x_t = self.p_sample_step(
-                denoise_fn, x_t, t, generator=rng, architecture=architecture
+                denoise_fn, x_t, t, generator=rng
             )
         return x_t
 
@@ -263,7 +277,11 @@ class GaussianDiffusion:
         return (output, pred_x_0) if return_pred else output
 
     def train_losses(self, denoise_fn, x_0, t, noise=None, delta=None):
-        architecture = "unet" if delta is None else "unet2h"
+        architecture = (
+            denoise_fn.architecture_name
+            if hasattr(denoise_fn, "architecture_name")
+            else "unet"
+        )
 
         if noise is None:
             noise = torch.randn_like(x_0)
@@ -301,13 +319,6 @@ class GaussianDiffusion:
 
             elif architecture == "unet2h":
                 pred_noise, pred_delta = denoise_fn(x_t, t)
-                # print(
-                #     "pred noise : ",
-                #     pred_noise.mean(),
-                #     "pred delta : ",
-                #     pred_delta.mean(),
-                # )
-
                 if self.model_mean_type == "x_0":
                     target = x_0
                     target_delta = delta
@@ -317,9 +328,14 @@ class GaussianDiffusion:
                 else:
                     raise NotImplementedError(self.model_mean_type)
 
+                # print("target mean value: ", target.mean())
+                # print("target delta value: ", target_delta.mean())
                 losses = flat_mean(
                     ((target - pred_noise) + (target_delta - pred_delta)).pow(2)
                 )
+
+            else:
+                raise NotImplementedError(architecture)
 
         else:
             raise NotImplementedError(self.loss_type)

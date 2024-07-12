@@ -39,7 +39,7 @@ class AttentionBlock(nn.Module):
         self.mid_channels = mid_channels
         self.out_channels = out_channels
         self.skip = nn.Identity() if in_channels == out_channels else Conv2d(in_channels, out_channels, 1)
-
+        
     @staticmethod
     def qkv(q, k, v):
         B, C, H, W = q.shape
@@ -107,7 +107,7 @@ class UNet(nn.Module):
     ):
         super(UNet, self).__init__()
         print("model used : UNet")
-        
+        self.architecture_name = 'unet'
         self.in_channels = in_channels
         self.hid_channels = hid_channels
         self.out_channels = out_channels

@@ -107,6 +107,7 @@ class UNet2H(nn.Module):
     ):
         super(UNet2H, self).__init__()
         print("model used : UNet2H")
+        self.architecture_name = 'unet2h'
         self.in_channels = in_channels
         self.hid_channels = hid_channels
         self.out_channels = out_channels
