@@ -135,7 +135,7 @@ class GaussianDiffusion:
             out = out + delta
         else:
             raise NotImplementedError(architecture)
-                
+
         if self.model_var_type == "learned":
             assert all(out.shape == (B, 2 * C, H, W))
             out, model_logvar = out.chunk(2, dim=1)
@@ -160,7 +160,7 @@ class GaussianDiffusion:
             model_mean, *_ = self.q_posterior_mean_var(x_0=pred_x_0, x_t=x_t, t=t)
         else:
             raise NotImplementedError(self.model_mean_type)
-
+        
         if return_pred:
             return model_mean, model_var, model_logvar, pred_x_0
         else:
@@ -187,6 +187,7 @@ class GaussianDiffusion:
         return_pred=False,
         generator=None,
     ):
+        #x_t.requires_grad_(True)
         model_mean, _, model_logvar, pred_x_0 = self.p_mean_var(
             denoise_fn,
             x_t,
@@ -219,12 +220,63 @@ class GaussianDiffusion:
             x_t = noise.to(device)
         for ti in range(self.timesteps - 1, -1, -1):
             t.fill_(ti)
-            x_t = self.p_sample_step(
-                denoise_fn, x_t, t, generator=rng
-            )
+            x_t = self.p_sample_step(denoise_fn, x_t, t, generator=rng)
         return x_t
 
-    @torch.inference_mode()
+    ## Poisoned sample generation
+    
+    def p_poisoned_sample(
+        self,
+        denoise_fn,
+        shape=None,
+        device=torch.device("cpu"),
+        noise=None,
+        seed=None,
+        eps_attack=0.1,
+        percentage_attack=0.1,
+        random_start=False,
+    ):
+        B = (shape or noise.shape)[0]
+        t = torch.empty((B,), dtype=torch.int64, device=device)
+        rng = None
+        if seed is not None:
+            rng = torch.Generator(device).manual_seed(seed)
+        if noise is None:
+            x_t = torch.empty(shape, device=device).normal_(generator=rng)
+        else:
+            x_t = noise.to(device)
+        # select the indexes of the time steps to attack
+        attack_steps = torch.randperm(self.timesteps, generator=rng)
+        attack_steps = attack_steps[: int(self.timesteps * percentage_attack)]
+
+        for ti in range(self.timesteps - 1, -1, -1):
+            t.fill_(ti)
+            
+            print("time step: ", ti)
+
+            x_t = self.p_sample_step(denoise_fn, x_t, t, generator=rng)
+            if ti in attack_steps:
+                print("Attacking time step: ", ti)
+                perturbation = (
+                    torch.zeros_like(x_t, requires_grad=True, device=x_t.device)
+                    if not random_start
+                    else torch.randn_like(x_t, requires_grad=True, device=x_t.device)
+                )
+                perturbation.requires_grad_(True)
+                assert perturbation.requires_grad
+                
+                with torch.enable_grad():
+                    x_t_poisoned = self.p_sample_step(
+                        denoise_fn, x_t + perturbation, t, generator=rng
+                    )
+                    loss = torch.nn.functional.mse_loss(x_t_poisoned, x_t)
+                    grad = torch.autograd.grad(loss, perturbation)[0]
+                    perturbation = perturbation + eps_attack * torch.sign(grad)
+
+                x_t = x_t + perturbation.clone().detach()
+
+        return x_t
+
     def p_sample_progressive(
         self,
         denoise_fn,
