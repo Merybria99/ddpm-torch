@@ -162,6 +162,7 @@ class Trainer:
             inputs["delta"] = None
 
         loss = self.diffusion.train_losses(self.model, **inputs)
+        print('loss shape : ' , loss.shape)
         assert loss.shape == (x.shape[0],)
         return loss
 
@@ -174,7 +175,7 @@ class Trainer:
             inputs["noise"],
             inputs["delta"],  # delta is always 0 at the beginning
         )
-        perturbation = torch.zeros_like(x0, dtype=torch.float32, device=self.device,requires_grad=True) + epsilon * 2 * torch.randn_like(x0, device=self.device) if not self.random_start else torch.randn_like(x0, dtype=torch.float32, device=self.device,requires_grad=True)  
+        #perturbation = torch.zeros_like(x0, dtype=torch.float32, device=self.device,requires_grad=True) + epsilon * 2 * torch.randn_like(x0, device=self.device) if not self.random_start else torch.randn_like(x0, dtype=torch.float32, device=self.device,requires_grad=True)  
         
         # divide the x tensor in two parts according to the percentage of adversarial examples
         clean_x , adv_x = torch.split(x, [int(x.shape[0]*(1-adv_percentage)), int(x.shape[0]*adv_percentage)], dim=0)        
@@ -182,33 +183,35 @@ class Trainer:
         clean_timesteps, adv_timesteps = torch.split(timesteps, [int(timesteps.shape[0]*(1-adv_percentage)), int(timesteps.shape[0]*adv_percentage)], dim=0)
         clean_noise, adv_noise = torch.split(noise, [int(noise.shape[0]*(1-adv_percentage)), int(noise.shape[0]*adv_percentage)], dim=0)
         clean_delta, adv_delta = torch.split(delta, [int(delta.shape[0]*(1-adv_percentage)), int(delta.shape[0]*adv_percentage)], dim=0)
-        
-        # attack the adversarial examples
-        self.model.eval()
-        with torch.enable_grad():
-            """the function loss calls the following functions :
-            - train losses ->
-                    - noisies the sample with the passed noise
-                    - generates a noisy sample made as sqrt(alpha_ba)*x0 + (1-sqrt(alpha_bar)) * noise
+        if adv_x.shape[0]>0 :
+            # attack the adversarial examples
+            self.model.eval()
+            with torch.enable_grad():
+                """the function loss calls the following functions :
+                - train losses ->
+                        - noisies the sample with the passed noise
+                        - generates a noisy sample made as sqrt(alpha_ba)*x0 + (1-sqrt(alpha_bar)) * noise
+                
+                """
+                perturbation = torch.zeros_like(adv_noise, dtype=torch.float32, device=self.device,requires_grad=True) + epsilon * 2 * torch.randn_like(adv_noise, device=self.device) if not self.random_start else torch.randn_like(adv_noise, dtype=torch.float32, device=self.device,requires_grad=True)  
             
-            """
-            inputs["x_0"] = adv_x
-            inputs["t"] = adv_timesteps
-            inputs["noise"] = adv_noise + perturbation
-            inputs["delta"] = adv_delta 
-            adv_loss = self.loss(x0, inputs=inputs).mean()
+                inputs["x_0"] = adv_x
+                inputs["t"] = adv_timesteps
+                inputs["noise"] = adv_noise + perturbation
+                inputs["delta"] = adv_delta 
+                adv_loss = self.loss(x0, inputs=inputs).mean()
 
-            grad = torch.autograd.grad(adv_loss, perturbation)[0]
+                grad = torch.autograd.grad(adv_loss, perturbation)[0]
+                
+            if self.attack_norm == "inf":
+                adv_delta.data = epsilon * grad.detach().sign() + perturbation
+            elif self.attack_norm == "2":
+                adv_delta.data = (grad.detach() / grad.detach().norm()) * epsilon + perturbation
+            # sum the noise and the delta to get the adversarial example
+            adv_noise = adv_noise + adv_delta        
             
-        if self.attack_norm == "inf":
-            adv_delta.data = epsilon * grad.detach().sign() + perturbation
-        elif self.attack_norm == "2":
-            adv_delta.data = (grad.detach() / grad.detach().norm()) * epsilon + perturbation
-        # sum the noise and the delta to get the adversarial example
-        adv_noise = adv_noise + adv_delta        
-        
-        self.model.train()
-        #print('difference ', torch.norm(adv_noise - flag))
+            self.model.train()
+            #print('difference ', torch.norm(adv_noise - flag))
         
         # concat clean and adversarial examples
         x = torch.cat((clean_x, adv_x), dim=0)
@@ -231,9 +234,6 @@ class Trainer:
         inputs["delta"] = delta
         
         loss = self.loss(x, inputs=inputs).mean()
-        
-        
-        
         
         loss.div(self.num_accum).backward()  # average over accumulated mini-batches
         if global_steps % self.num_accum == 0:

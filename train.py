@@ -1,3 +1,4 @@
+#!/home/briglia/miniconda3/envs/advDM/bin/python3
 import json
 import os
 import tempfile
@@ -5,14 +6,17 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from datetime import datetime
-from ddim import *
-from ddpm_torch import *
 from functools import partial
 from torch.distributed.elastic.multiprocessing import errors
 from torch.nn.parallel import DistributedDataParallel as DDP  # noqa
 from torch.optim import Adam, lr_scheduler
 import wandb
-import sys
+
+import sys 
+sys.path.append('/home/briglia/basefolder/advDM/ddpm-torch')
+from ddpm_torch import *
+from ddim import *
+
 
 model_instanciations = {
     "unet": UNet,
