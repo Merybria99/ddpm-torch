@@ -12,7 +12,6 @@ from torch.distributed.elastic.multiprocessing import errors
 from torch.nn.parallel import DistributedDataParallel as DDP  # noqa
 from torch.optim import Adam, lr_scheduler
 import wandb
-import sys
 
 model_instanciations = {
     "unet": UNet,
