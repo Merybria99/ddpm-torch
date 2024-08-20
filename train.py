@@ -12,12 +12,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP  # noqa
 from torch.optim import Adam, lr_scheduler
 import wandb
 
-import sys 
-sys.path.append('/home/briglia/basefolder/advDM/ddpm-torch')
-from ddpm_torch import *
-from ddim import *
-
-
 model_instanciations = {
     "unet": UNet,
     "unet2h": UNet2H,
