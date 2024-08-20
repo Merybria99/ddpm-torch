@@ -12,6 +12,7 @@ from torch.distributed.elastic.multiprocessing import errors
 from torch.nn.parallel import DistributedDataParallel as DDP  # noqa
 from torch.optim import Adam, lr_scheduler
 import wandb
+import sys
 
 model_instanciations = {
     "unet": UNet,
@@ -35,8 +36,6 @@ def train(rank=0, args=None, temp_dir=""):
     os.environ["WANDB_DIR"] = f"{base_dir}/.cache/wandb"
     torch.hub.set_dir(f"{base_dir}/.cache")
     
-    # Initialize wandb
-    exp_name = ''.join([args.exp_name, '-', datetime.now().strftime("%Y-%m-%dT%H%M%S%f")])
         
     #####################  TRAINING CONFIG  #####################
 
@@ -49,13 +48,19 @@ def train(rank=0, args=None, temp_dir=""):
         args.config_path = os.path.join(args.config_dir, args.dataset + ".json")
     with open(args.config_path, "r") as f:
         meta_config = json.load(f)
-    exp_name = os.path.basename(args.config_path)[:-5]
+    #exp_name = os.path.basename(args.config_path)[:-5]
+    exp_name = ''.join([args.exp_name, '-', datetime.now().strftime("%Y-%m-%dT%H%M%S%f")])
 
     # dataset basic info
     dataset = meta_config.get("dataset", args.dataset)
     in_channels = DATASET_INFO[dataset]["channels"]
     image_res = DATASET_INFO[dataset]["resolution"]
     image_shape = (in_channels, ) + image_res
+    
+    print(f"Dataset: {dataset}")
+    print(f"Image shape: {image_shape}")
+    print(f"Number of channels: {in_channels}")
+    print(f"Image resolution: {image_res}")
 
     # set seed for RNGs
     seed = meta_config.get("seed", args.seed)
@@ -276,9 +281,9 @@ def train(rank=0, args=None, temp_dir=""):
     }
     if resume :
         wandb_run_id = args.wandb_id
-        wandb.init(project="ddpm-cifar10", name=exp_name, config=wandb_config_dict, resume='allow', id=wandb_run_id) 
+        wandb.init(project=f"ddpm-{dataset}", name=exp_name, config=wandb_config_dict, resume='allow', id=wandb_run_id) 
     else:
-        wandb.init(project="ddpm-cifar10", name=exp_name, config=wandb_config_dict)
+        wandb.init(project=f"ddpm-{dataset}", name=exp_name, config=wandb_config_dict)
     wandb.watch(model)
 
     logger("Training starts...", flush=True)
@@ -317,7 +322,7 @@ def main():
     parser.add_argument("--config-dir", default="./configs", type=str)
     parser.add_argument("--chkpt-dir", type=str)
     parser.add_argument("--chkpt-name", default="", type=str)
-    parser.add_argument("--chkpt-intv", default=120, type=int, help="frequency of saving a checkpoint")
+    parser.add_argument("--chkpt-intv", default=10, type=int, help="frequency of saving a checkpoint")
     parser.add_argument("--seed", default=1234, type=int, help="random seed")
     parser.add_argument("--resume", action="store_true", help="to resume training from a checkpoint")
     parser.add_argument("--chkpt-path", default="", type=str, help="checkpoint path used to resume training")
@@ -334,12 +339,14 @@ def main():
     parser.add_argument("--num-gpus", default=1, type=int, help="number of gpus for distributed training")
     parser.add_argument("--dry-run", action="store_true", help="test-run till the first model update completes")
 
-    parser.add_argument("--adv-percentage", default=0, type=float, help="percentage of adversarial examples in the training procedure")
+    parser.add_argument("--adv-percentage", default=1, type=float, help="percentage of adversarial examples in the training procedure")
     parser.add_argument("--architecture", default="unet", type=str, choices = model_instanciations.keys() ,help="model architecture to use")
     parser.add_argument("--attack-norm", default="inf", type=str, choices=["inf", "2"], help="norm to use for the adversarial attack")
     parser.add_argument("--wandb-id", default=None, type=str, help="wandb id to resume a run")
-    args = parser.parse_args()
-    
+
+    args, unknown = parser.parse_known_args()
+
+        
     if args.distributed and args.rigid_launch:
         mp.set_start_method("spawn")
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -357,7 +364,7 @@ def main():
         """
         train(args=args)
 
-
+# %%python --config-path ./configs/cifar10.json --root /home/maria.briglia/ddpm_torch --exp-name flag --chkpt-dir  --image-dir 
 if __name__ == "__main__":
     main()
 
