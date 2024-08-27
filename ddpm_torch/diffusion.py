@@ -199,6 +199,8 @@ class GaussianDiffusion:
         nonzero_mask = (t > 0).reshape((-1,) + (1,) * (x_t.ndim - 1)).to(x_t)
         sample = model_mean + nonzero_mask * torch.exp(0.5 * model_logvar) * noise
         return (sample, pred_x_0) if return_pred else sample
+    
+   
 
     @torch.inference_mode()
     def p_sample(
@@ -224,6 +226,40 @@ class GaussianDiffusion:
         return x_t
 
     ## Poisoned sample generation
+    def p_poisoned_sample_step(
+        self,
+        denoise_fn,
+        x_t,
+        t,
+        clip_denoised=True,
+        return_pred=False,
+        generator=None,
+        **kwargs,
+    ):
+        #x_t.requires_grad_(True)
+        eps_attack = kwargs.get("eps_attack", 0.1)
+        random_start = kwargs.get("random_start", False)
+        
+        perturbation = (
+            torch.zeros_like(x_t, requires_grad=True, device=x_t.device) + eps_attack * torch.randn_like(x_t) 
+            if not random_start
+            else torch.randn_like(x_t, requires_grad=True, device=x_t.device)
+        )
+        perturbation.requires_grad_(True)
+        assert perturbation.requires_grad
+
+        model_mean, _, model_logvar, pred_x_0 = self.p_mean_var(
+            denoise_fn,
+            x_t,
+            t,
+            clip_denoised=clip_denoised,
+            return_pred=True,
+        )
+        noise = torch.empty_like(x_t).normal_(generator=generator)
+        noise = noise + perturbation
+        nonzero_mask = (t > 0).reshape((-1,) + (1,) * (x_t.ndim - 1)).to(x_t)
+        sample = model_mean + nonzero_mask * torch.exp(0.5 * model_logvar) * noise
+        return (sample, pred_x_0) if return_pred else sample
     
     def p_poisoned_sample(
         self,
@@ -254,16 +290,10 @@ class GaussianDiffusion:
             
             print("time step: ", ti)
 
-            x_t = self.p_sample_step(denoise_fn, x_t, t, generator=rng)
+            x_t = self.p_poisoned_sample_step(denoise_fn, x_t, t, generator=rng)
             if ti in attack_steps:
                 print("Attacking time step: ", ti)
-                perturbation = (
-                    torch.zeros_like(x_t, requires_grad=True, device=x_t.device)
-                    if not random_start
-                    else torch.randn_like(x_t, requires_grad=True, device=x_t.device)
-                )
-                perturbation.requires_grad_(True)
-                assert perturbation.requires_grad
+                
                 
                 with torch.enable_grad():
                     x_t_poisoned = self.p_sample_step(
@@ -271,6 +301,7 @@ class GaussianDiffusion:
                     )
                     loss = torch.nn.functional.mse_loss(x_t_poisoned, x_t)
                     grad = torch.autograd.grad(loss, perturbation)[0]
+                    print("grad: ", grad.mean())
                     perturbation = perturbation + eps_attack * torch.sign(grad)
 
                 x_t = x_t + perturbation.clone().detach()

@@ -1,4 +1,3 @@
-#!/home/briglia/miniconda3/envs/advDM/bin/python3
 import json
 import os
 import tempfile
@@ -149,7 +148,6 @@ def train(rank=0, args=None, temp_dir=""):
 
     is_leader = rank == 0  # rank 0: leader in the process group
 
-    logger(f"Dataset: {dataset}")
     logger(
         f"Effective batch-size is {train_config.batch_size} * {args.num_accum}"
         f" = {train_config.batch_size * args.num_accum}.")
@@ -170,6 +168,8 @@ def train(rank=0, args=None, temp_dir=""):
         dataset, batch_size=train_config.batch_size, split=split, val_size=0., random_seed=seed,
         root=root, drop_last=True, pin_memory=True, num_workers=num_workers, distributed=distributed
     )  # drop_last to have a static input shape; num_workers > 0 to enable asynchronous data loading
+    
+
 
     if args.dry_run:
         logger("This is a dry run.")
@@ -204,8 +204,7 @@ def train(rank=0, args=None, temp_dir=""):
             json.dump(hps, f, indent=2)
         if not os.path.exists(image_dir):
             os.makedirs(image_dir)
-            
-    
+
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
@@ -287,7 +286,7 @@ def train(rank=0, args=None, temp_dir=""):
     logger("Training starts...", flush=True)
     trainer.train(evaluator, chkpt_path=chkpt_path, image_dir=image_dir)
 
-
+# %%
 @errors.record
 def main():
     from argparse import ArgumentParser
@@ -296,7 +295,7 @@ def main():
     parser.add_argument("--config-path", type=str, help="path to the configuration file")
     parser.add_argument("--exp-name", type=str, help="name of the current experiment run")
     parser.add_argument("--dataset", choices=DATASET_DICT.keys(), default="cifar10")
-    parser.add_argument("--root", default="~/datasets", type=str, help="root directory of datasets")
+    parser.add_argument("--root", default="/home/hl-fury/mariarosaria.briglia/ddpm-torch/data", type=str, help="root directory of datasets")
     parser.add_argument("--epochs", default=50, type=int, help="total number of training epochs")
     parser.add_argument("--lr", default=0.0002, type=float, help="learning rate")
     parser.add_argument("--beta1", default=0.9, type=float, help="beta_1 in Adam")
@@ -314,11 +313,11 @@ def main():
     parser.add_argument("--num-workers", default=4, type=int, help="number of workers for data loading")
     parser.add_argument("--train-device", default="cuda:0", type=str)
     parser.add_argument("--eval-device", default="cuda:0", type=str)
-    parser.add_argument("--image-dir", default="./images", type=str)
+    parser.add_argument("--image-dir", default="/home/hl-fury/maria.briglia/data/ddpm-train/images/flag", type=str)
     parser.add_argument("--image-intv", default=10, type=int)
     parser.add_argument("--num-samples", default=64, type=int, help="number of images to sample and save")
     parser.add_argument("--config-dir", default="./configs", type=str)
-    parser.add_argument("--chkpt-dir", type=str)
+    parser.add_argument("--chkpt-dir", default = '/home/hl-fury/maria.briglia/data/ddpm-train/chkpt-dir/flag', type=str)
     parser.add_argument("--chkpt-name", default="", type=str)
     parser.add_argument("--chkpt-intv", default=10, type=int, help="frequency of saving a checkpoint")
     parser.add_argument("--seed", default=1234, type=int, help="random seed")
@@ -336,11 +335,12 @@ def main():
     parser.add_argument("--rigid-launch", action="store_true", help="whether to use torch multiprocessing spawn")
     parser.add_argument("--num-gpus", default=1, type=int, help="number of gpus for distributed training")
     parser.add_argument("--dry-run", action="store_true", help="test-run till the first model update completes")
-
+    # /home/hl-fury/mariarosaria.briglia/ddpm-torch/models/celeb_a/celeba-0.3-2024-08-20T114341110230/celeba-0.3-2024-08-20T114341110230_370.pt
     parser.add_argument("--adv-percentage", default=1, type=float, help="percentage of adversarial examples in the training procedure")
     parser.add_argument("--architecture", default="unet", type=str, choices = model_instanciations.keys() ,help="model architecture to use")
     parser.add_argument("--attack-norm", default="inf", type=str, choices=["inf", "2"], help="norm to use for the adversarial attack")
     parser.add_argument("--wandb-id", default=None, type=str, help="wandb id to resume a run")
+    
 
     args, unknown = parser.parse_known_args()
 
@@ -375,3 +375,5 @@ python train.py --dataset cifar10 --root /home/maria.briglia/data/ddpm-train --a
 - adv training with 100% adversarial examples:
 python train.py --dataset cifar10 --chkpt-intv 10 --root /home/maria.briglia/data/adv-ddpm-train --exp-name adv-flag --chkpt-dir /home/maria.briglia/data/adv-ddpm-train/chkpts --adv-percentage 1 --image-dir /home/maria.briglia/data/adv-ddpm-train/images
 """
+
+# %%

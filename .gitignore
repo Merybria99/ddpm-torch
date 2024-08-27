@@ -27,3 +27,5 @@ models/adv-ddpm/*
 data/cifar-10-batches-py/*
 models/celeb_a/celeba-0.3-2024-08-20T114341110230/exp_2024-08-20T114341927046.info
 data/cifar-10-python.tar.gz
+models/celeb_a/celeba-0.3-2024-08-20T114341110230/*
+
