@@ -64,6 +64,7 @@ def generate(rank, args, counter=0, **kwargs):
     device = torch.device(f"cuda:{rank}" if args.num_gpus > 1 else args.device)
     block_size = meta_config["model"].pop("block_size", 1)
     model = UNet(out_channels=in_channels, **meta_config["model"])
+    
     if block_size > 1:
         pre_transform = torch.nn.PixelUnshuffle(block_size)  # space-to-depth
         post_transform = torch.nn.PixelShuffle(block_size)  # depth-to-space
@@ -213,6 +214,7 @@ def main():
                 generate(0, args, exp_name=exp_name, folder_name=folder_name, save_dir=save_dir)
 
             print("Done for the generation!")
+        
         # load the dataset
         dataset_train = DATASET_DICT[args.dataset](
             "/home/maria.briglia/data/ddpm-train", "train"
@@ -223,20 +225,15 @@ def main():
             dataset_train, batch_size=batch_size, shuffle=True
         )
         
-        os.makedirs(f"{args.ckpt_dir}/logs", exist_ok=True)
-        with open(f"{args.ckpt_dir}/logs/metrics.csv", "a") as f:
-            writer = csv.writer(f)
-            writer.writerow([epoch, fid.compute().item(), inception_score.compute().item()])
-
         # instantiate the FID and IS
         from torchmetrics.image import FrechetInceptionDistance, InceptionScore
-
+        print("Instanciating the FID and IS...")
         fid = FrechetInceptionDistance()
         inception_score = InceptionScore()
 
         # iterate over the dataset for 10k samples and compute the FID and IS
-        tot_samples = 10_000
-        for i, x in enumerate(train_dataloader):    
+        tot_samples = args.total_size
+        for i, x in enumerate(train_dataloader): 
             if i * batch_size > tot_samples:
                 break
             fid.update(x, real=True)
@@ -251,9 +248,13 @@ def main():
             fid.update(x, real=False)
             inception_score.update(x)
         
-        with open(f"{args.ckpt_dir}/logs/metrics.csv", "a") as f:
+        with open(f"{args.chkpt_dir}/logs/metrics.csv", "a") as f:
             writer = csv.writer(f)
-            writer.writerow([epoch, fid.compute().item(), inception_score.compute().item()])
+            fid = fid.compute()
+            inception_score = inception_score.compute()[0]
+            print(f"Epoch {epoch} - FID: {fid} - IS: {inception_score}")
+            
+            writer.writerow([epoch, fid, inception_score])
         # delete the generated samples
         for image in os.listdir(save_dir):
             os.remove(os.path.join(save_dir, image))
