@@ -12,7 +12,8 @@ from ddim import DDIM, get_selection_schedule
 from ddpm_torch import *
 from multiprocessing.sharedctypes import Synchronized
 from tqdm import tqdm
-
+import numpy as np
+import csv
 
 def progress_monitor(total, counter):
     pbar = tqdm(total=total)
@@ -177,7 +178,7 @@ def main():
     parser.add_argument("--suffix", default="", type=str)
     parser.add_argument("--max-workers", default=8, type=int)
     parser.add_argument("--num-gpus", default=1, type=int)
-    
+    parser.add_argument("--interval", default=50, type=int)
     args = parser.parse_args()
 
     world_size = args.world_size = args.num_gpus or 1
@@ -190,17 +191,74 @@ def main():
     exp_name = os.path.basename(args.config_path)[:-5]
     folder_name = os.path.basename(args.chkpt_path)[:-3]
     save_dir = os.path.join(args.save_dir, "eval", exp_name, folder_name)
+    for file in os.listdir(args.chkpt_dir):
+        if file.endswith(".pt"):
+            epoch = int(file.split("_")[-1].split(".")[0])
+            if epoch != args.interval:
+                continue
+        else :
+            continue
+        if file.startswith(folder_name) and file.endswith(".pt"):
+            args.chkpt_path = os.path.join(args.chkpt_dir, file)
+                
+        if not os.path.exists(save_dir):
+            if world_size > 1:
+                mp.set_start_method("spawn")
+                counter = mp.Value("i", 0)
+                mp.Process(
+                    target=progress_monitor, args=(num_batches, counter), daemon=True
+                ).start()
+                mp.spawn(generate, args=(args, counter), nprocs=world_size)
+            else:
+                generate(0, args, exp_name=exp_name, folder_name=folder_name, save_dir=save_dir)
 
-    if world_size > 1:
-        mp.set_start_method("spawn")
-        counter = mp.Value("i", 0)
-        mp.Process(
-            target=progress_monitor, args=(num_batches, counter), daemon=True
-        ).start()
-        mp.spawn(generate, args=(args, counter), nprocs=world_size)
-    else:
-        generate(0, args, exp_name=exp_name, folder_name=folder_name, save_dir=save_dir)
+            print("Done for the generation!")
+        # load the dataset
+        dataset_train = DATASET_DICT[args.dataset](
+            "/home/maria.briglia/data/ddpm-train", "train"
+        )
+        torch.manual_seed(0)
+        batch_size = 100
+        train_dataloader = torch.utils.data.DataLoader(
+            dataset_train, batch_size=batch_size, shuffle=True
+        )
+        
+        os.makedirs(f"{args.ckpt_dir}/logs", exist_ok=True)
+        with open(f"{args.ckpt_dir}/logs/metrics.csv", "a") as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch, fid.compute().item(), inception_score.compute().item()])
 
+        # instantiate the FID and IS
+        from torchmetrics.image import FrechetInceptionDistance, InceptionScore
+
+        fid = FrechetInceptionDistance()
+        inception_score = InceptionScore()
+
+        # iterate over the dataset for 10k samples and compute the FID and IS
+        tot_samples = 10_000
+        for i, x in enumerate(train_dataloader):    
+            if i * batch_size > tot_samples:
+                break
+            fid.update(x, real=True)
+            
+        # iterate over the generated samples and compute the FID and IS
+        for image in os.listdir(save_dir):
+            if not image.endswith(".png"):
+                continue
+            # load the image in a tensor
+            x = Image.open(os.path.join(save_dir, image))
+            x = torch.tensor(np.array(x)).permute(2, 0, 1).unsqueeze(0)
+            fid.update(x, real=False)
+            inception_score.update(x)
+        
+        with open(f"{args.ckpt_dir}/logs/metrics.csv", "a") as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch, fid.compute().item(), inception_score.compute().item()])
+        # delete the generated samples
+        for image in os.listdir(save_dir):
+            os.remove(os.path.join(save_dir, image))
+        os.rmdir(save_dir)
+        print("Done for the evaluation!")
 
 if __name__ == "__main__":
     main()
@@ -208,6 +266,5 @@ if __name__ == "__main__":
 
 """
 command lines for launching generation:
-- python generate.py --config-path /home/maria.briglia/AdvTrain/ddpm-torch/configs/cifar10.json --dataset cifar10 --total-size 50000  --use-ema --chkpt-path /home/maria.briglia/data/ddpm-train/chkpts/cifar10/cifar10_480.pt  --save-dir /home/maria.briglia/data/ddpm-train/cifar10-images --batch-size 512
-
+python generate_evaluate.py --config-path /home/maria.briglia/AdvTrain/ddpm-torch/configs/cifar10.json --dataset cifar10 --total-size 10000  --use-ema --chkpt-path /home/maria.briglia/data/ddpm-train/chkpts/cifar10/cifar10_480.pt  --save-dir /home/maria.briglia/data/ddpm-train/cifar10-images-trial --batch-size 512 --chkpt-dir /home/maria.briglia/data/ddpm-train/chkpts/cifar10
 """
