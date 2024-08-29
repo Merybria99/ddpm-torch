@@ -197,7 +197,7 @@ def main():
     for file in os.listdir(args.chkpt_dir):
         if file.endswith(".pt"):
             epoch = int(file.split("_")[-1].split(".")[0])
-            if epoch != args.interval:
+            if (epoch % args.interval) == 0:
                 continue
         else :
             continue
@@ -227,10 +227,10 @@ def main():
             dataset_train, batch_size=batch_size, shuffle=True
         )
         
-        os.makedirs(f"{args.ckpt_dir}/logs", exist_ok=True)
-        with open(f"{args.ckpt_dir}/logs/metrics.csv", "a") as f:
+        os.makedirs(f"{args.chkpt_dir}/logs", exist_ok=True)
+        with open(f"{args.chkpt_dir}/logs/metrics.csv", "a") as f:
             writer = csv.writer(f)
-            writer.writerow([epoch, fid.compute().item(), inception_score.compute().item()])
+            writer.writerow(['epoch', 'FID', 'IS'])
 
         # instantiate the FID and IS
         from torchmetrics.image import FrechetInceptionDistance, InceptionScore
