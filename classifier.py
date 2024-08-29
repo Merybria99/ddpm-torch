@@ -6,6 +6,10 @@ from argparse import ArgumentParser
 from ddim import DDIM, get_selection_schedule
 from ddpm_torch import *
 
+save_path = "./classifier-plots"
+if not os.path.exists(save_path):
+    os.makedirs(save_path)
+    
 try:
     parser = ArgumentParser()
     parser.add_argument("--dataset", choices=DATASET_DICT.keys(), default="cifar10")
@@ -147,7 +151,13 @@ fig, axes = plt.subplots(1, num_images, figsize=(20, 20))
 for i in range(num_images):
     axes[i].imshow(images_to_be_evaluated[i])
     axes[i].axis("off")
-plt.show()
+#%%
+plt.savefig(
+    os.path.join(
+        save_path, f"generated_images-{''.join(chkpt_path.split('/')[-3:])}.png"
+    )
+)
+plt.close()
 
 
 # %%
@@ -200,14 +210,6 @@ cifar10_classes = [
 hist = {c: 0 for c in cifar10_classes}
 # generate 10k imgaes and evaluate them with the classifier and populate the histogram
 for i, images in enumerate(test_dataloader):
-    # plot the image of the batch in a grid 8 x 8
-    # plt.figure(figsize=(20, 20))
-    # for i in range(8):
-    #     for j in range(8):
-    #         plt.subplot(8, 8, i*8+j+1)
-    #         plt.imshow(images[i*8+j].permute(1, 2, 0).numpy())
-    #         plt.axis("off")
-    # plt.show()
     # normalize the images in [-1,1] from [0, 255]
     images = (images - 127.5) / 127.5
     outputs = wr(images.to(device))
@@ -220,9 +222,12 @@ for i, images in enumerate(test_dataloader):
 import matplotlib.pyplot as plt
 
 plt.bar(hist.keys(), hist.values())
-plt.show()
-
+plt.savefig(os.path.join(save_path, f"histogram-training-set.png"))
+            
+plt.close()
 # %%
+# generate 10k images and evaluate them with the classifier and populate the histogram of the classified samples according to the classifier
+
 from tqdm import tqdm
 
 bs = 100
@@ -248,13 +253,14 @@ for i in tqdm(range(num_batches)):
         generated_img_histogram[cifar10_classes[cp]] += 1
 print(generated_img_histogram)
 
-# plot the histogram
-import matplotlib.pyplot as plt
+# suplot the histogram on the same as the previous one
 
+plt.bar(hist.keys(), hist.values())
 plt.bar(generated_img_histogram.keys(), generated_img_histogram.values())
-plt.show()
+plt.savefig(os.path.join(save_path, f"histogram-generated-{''.join(chkpt_path.split('/')[-3:])}.png"))
+plt.close()
 # %%
-# plot all the images in a grid 10 x 10
+# plot all the images 100 of a batch in a grid 10 x 10
 import matplotlib.pyplot as plt
 
 fig, axes = plt.subplots(10, 10, figsize=(20, 20))
@@ -262,9 +268,14 @@ for i in range(10):
     for j in range(10):
         axes[i, j].imshow(images_to_be_evaluated[i * 10 + j])
         axes[i, j].axis("off")
-plt.show()
+plt.savefig(os.path.join(save_path, f"generated_images-{''.join(chkpt_path.split('/')[-3:])}.png"))
+plt.close()
 # %%
-shape = (100,) + input_shape
+
+# I get the 100 images batch from the test dataloader
+batch = next(iter(test_dataloader))
+# generate 100 images
+shape = (batch.shape[0],) + input_shape
 x = diffusion.p_sample(
     model, shape=shape, device=device, noise=torch.randn(shape, device=device)
 ).cpu()
@@ -276,7 +287,6 @@ images_to_be_evaluated = (
     .permute(0, 2, 3, 1)
     .numpy()
 )
-
 # %%
 # plot all the images in a grid 10 x 10
 import matplotlib.pyplot as plt
@@ -287,56 +297,12 @@ for i in range(10):
         axes[i, j].imshow(images_to_be_evaluated[i * 10 + j])
         axes[i, j].axis("off")
 plt.show()
+plt.close()
 # %%
-img = x.float().to(device)
-print(img.shape)
+# I want to evaluate the most similar samples of the dataset to the generated images through the penultimate layer of the classifier
 
-batch = next(iter(test_dataloader))
-print(batch.shape)
-
-# plot the image of the batch in a grid 8 x 8
-plt.figure(figsize=(20, 20))
-for i in range(8):
-    for j in range(8):
-        plt.subplot(8, 8, i * 8 + j + 1)
-        plt.imshow(batch[i * 8 + j].permute(1, 2, 0).numpy())
-        plt.axis("off")
-plt.show()
-
-# %%
-batch = next(iter(test_dataloader))
-
-images = batch.to(device)
-# plot the image of the batch in a grid 8 x 8
-plt.figure(figsize=(20, 20))
-for i in range(8):
-    for j in range(8):
-        plt.subplot(8, 8, i * 8 + j + 1)
-        plt.imshow(images[i * 8 + j].permute(1, 2, 0).cpu().numpy())
-        plt.axis("off")
-plt.show()
-
-#  %%
-images = diffusion.p_sample(
-    model, shape=shape, device=device, noise=torch.randn(shape, device=device)
-).cpu()
-images_to_be_evaluated = (
-    (x * 127.5 + 127.5)
-    .round()
-    .clamp(0, 255)
-    .to(torch.uint8)
-    .permute(0, 2, 3, 1)
-    .numpy()
-)
-
-
-# %%
-
-for i, im in enumerate(images):
+for i, im in enumerate(x):
     dists = []
-    # plot the image
-    plt.imshow(im.permute(1, 2, 0).cpu().numpy())
-
     emb_im = wr.penultimate_embedding(im.unsqueeze(0).to(device).float())
 
     for batch in test_dataloader:
@@ -348,13 +314,12 @@ for i, im in enumerate(images):
             distance = torch.nn.functional.pairwise_distance(emb_im, emb)
             dists.append((distance, image.cpu()))
             #  sort the distances
-            dists.sort(key=lambda x: x[0], reverse=False)
+            dists.sort(key=lambda x: x[0], reverse=True)
             # get the top 10 images
             dists = dists[:10]
     # get all the values of the distances
     ds = [d.item() for d, _ in dists]
     images_ds = [i for _, i in dists]
-    print(ds)
     # plot all the images in a grid 1 x 11
     fig, axes = plt.subplots(1, 11, figsize=(20, 20))
     axes[0].imshow(images_to_be_evaluated[i])
@@ -363,7 +328,6 @@ for i, im in enumerate(images):
 
         axes[i + 1].imshow(img.permute(1, 2, 0).cpu().numpy())
         axes[i + 1].axis("off")
-    plt.show()
-
-
+    plt.savefig(os.path.join(save_path, f"classifier-most-similar-{''.join(chkpt_path.split('/')[-3:])}.png"))
+    plt.close()
 # %%
