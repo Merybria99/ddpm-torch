@@ -72,6 +72,8 @@ def generate(rank, args, counter=0, **kwargs):
     model.to(device)
     chkpt_dir = args.chkpt_dir
     chkpt_path = args.chkpt_path or os.path.join(chkpt_dir, f"ddpm_{dataset}.pt")
+    print(f"Loading checkpoint from {chkpt_path}...")
+    
     folder_name = kwargs.get(
         "folder_name", os.path.basename(chkpt_path)[:-3]
     )  # truncated at file extension
@@ -225,6 +227,11 @@ def main():
             dataset_train, batch_size=batch_size, shuffle=True
         )
         
+        os.makedirs(f"{args.ckpt_dir}/logs", exist_ok=True)
+        with open(f"{args.ckpt_dir}/logs/metrics.csv", "a") as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch, fid.compute().item(), inception_score.compute().item()])
+
         # instantiate the FID and IS
         from torchmetrics.image import FrechetInceptionDistance, InceptionScore
         print("Instanciating the FID and IS...")
@@ -267,5 +274,5 @@ if __name__ == "__main__":
 
 """
 command lines for launching generation:
-python generate_evaluate.py --config-path /home/maria.briglia/AdvTrain/ddpm-torch/configs/cifar10.json --dataset cifar10 --total-size 10000  --use-ema --chkpt-path /home/maria.briglia/data/ddpm-train/chkpts/cifar10/cifar10_480.pt  --save-dir /home/maria.briglia/data/ddpm-train/cifar10-images-trial --batch-size 512 --chkpt-dir /home/maria.briglia/data/ddpm-train/chkpts/cifar10
+python generate_evaluate.py --config-path /home/hl-fury/mariarosaria.briglia/ddpm-torch/configs/cifar10.json --dataset cifar10 --total-size 10000  --use-ema --chkpt-dir /home/hl-fury/mariarosaria.briglia/ddpm-torch/models/adv-ddpm/L2/adv-post-2024-08-08T160539047657  --save-dir /home/hl-fury/mariarosaria.briglia/ddpm-torch/images/L2/images-evaluation --batch-size 512 
 """
