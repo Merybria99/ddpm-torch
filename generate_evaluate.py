@@ -197,7 +197,7 @@ def main():
     for file in os.listdir(args.chkpt_dir):
         if file.endswith(".pt"):
             epoch = int(file.split("_")[-1].split(".")[0])
-            if (epoch % args.interval) == 0:
+            if (epoch % args.interval) != 0:
                 continue
         else :
             continue
