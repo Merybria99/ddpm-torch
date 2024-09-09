@@ -210,6 +210,7 @@ class GaussianDiffusion:
         device=torch.device("cpu"),
         noise=None,
         seed=None,
+        **kwargs,
     ):
         B = (shape or noise.shape)[0]
         t = torch.empty((B,), dtype=torch.int64, device=device)
@@ -220,7 +221,10 @@ class GaussianDiffusion:
             x_t = torch.empty(shape, device=device).normal_(generator=rng)
         else:
             x_t = noise.to(device)
-        for ti in range(self.timesteps - 1, -1, -1):
+        interval = kwargs.get("interval", 1)
+        #print("interval: ", interval)
+        for ti in range(self.timesteps - 1, -1, -interval):
+            #print("time step: ", ti)
             t.fill_(ti)
             x_t = self.p_sample_step(denoise_fn, x_t, t, generator=rng)
         return x_t

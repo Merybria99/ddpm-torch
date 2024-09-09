@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+from ddpm_torch import *
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp

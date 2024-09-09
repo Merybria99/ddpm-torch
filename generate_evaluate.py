@@ -49,6 +49,7 @@ def generate(rank, args, counter=0, **kwargs):
     )
 
     use_ddim = args.use_ddim
+    print(f"Using DDIM: {use_ddim}")
     if use_ddim:
         diffusion_kwargs["model_var_type"] = "fixed-small"
         skip_schedule = args.skip_schedule
@@ -228,7 +229,7 @@ def main():
         )
         
         os.makedirs(f"{args.chkpt_dir}/logs", exist_ok=True)
-        with open(f"{args.chkpt_dir}/logs/metrics.csv", "a") as f:
+        with open(f"{args.chkpt_dir}/logs/metrics-DDIM.csv", "a") as f:
             writer = csv.writer(f)
             writer.writerow(['epoch', 'FID', 'IS'])
 
@@ -255,7 +256,7 @@ def main():
             fid.update(x, real=False)
             inception_score.update(x)
         
-        with open(f"{args.chkpt_dir}/logs/metrics.csv", "a") as f:
+        with open(f"{args.chkpt_dir}/logs/metrics-DDIM.csv", "a") as f:
             writer = csv.writer(f)
             fid = fid.compute()
             inception_score = inception_score.compute()[0]
@@ -276,3 +277,4 @@ if __name__ == "__main__":
 command lines for launching generation:
 python generate_evaluate.py --config-path /home/hl-fury/mariarosaria.briglia/ddpm-torch/configs/cifar10.json --dataset cifar10 --total-size 10000  --use-ema --chkpt-dir /home/hl-fury/mariarosaria.briglia/ddpm-torch/models/adv-ddpm/L2/adv-post-2024-08-08T160539047657  --save-dir /home/hl-fury/mariarosaria.briglia/ddpm-torch/images/L2/images-evaluation --batch-size 512 
 """
+
