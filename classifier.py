@@ -6,10 +6,11 @@ from argparse import ArgumentParser
 from ddim import DDIM, get_selection_schedule
 from ddpm_torch import *
 
+# %%
 save_path = "./classifier-plots"
 if not os.path.exists(save_path):
     os.makedirs(save_path)
-    
+
 try:
     parser = ArgumentParser()
     parser.add_argument("--dataset", choices=DATASET_DICT.keys(), default="cifar10")
@@ -38,12 +39,12 @@ try:
     eta = args.eta
     num_gpus = args.num_gpus
     device = args.device
-    use_emas = args.use_ema
+    use_ema = args.use_ema
 except:
     config_path = "./configs/cifar10.json"
     dataset = "cifar10"
     config_dir = "./configs"
-    chkpt_path = "/home/hl-fury/mariarosaria.briglia/ddpm-torch/models/adv-ddpm/L2/adv-post-2024-08-08T160539047657/adv-post-2024-08-08T160539047657"
+    chkpt_path = "/home/hl-fury/mariarosaria.briglia/ddpm-torch/models/adv-ddpm/L2/UNet/cifar10/cifar10_480.pt"
     chkpt_dir = chkpt_path.rstrip("/")
     use_ddim = False
     skip_schedule = "linear"
@@ -53,6 +54,7 @@ except:
     device = "cuda"
     use_ema = False
 
+print('chkpt_path', chkpt_path) 
 
 # %%
 if config_path is None:
@@ -95,7 +97,7 @@ if block_size > 1:
     model = ModelWrapper(model, pre_transform, post_transform)
 model.to(device)
 chkpt_dir = chkpt_dir
-chkpt_path = chkpt_path + "_1040.pt" or os.path.join(chkpt_dir, f"ddpm_{dataset}.pt")
+chkpt_path = chkpt_path or os.path.join(chkpt_dir, f"ddpm_{dataset}.pt")
 folder_name = os.path.basename(chkpt_path)[:-3]  # truncated at file extension
 use_ema = meta_config["train"].get("use_ema", use_ema)
 
@@ -143,15 +145,16 @@ images_to_be_evaluated = (
     .permute(0, 2, 3, 1)
     .numpy()
 )
-
+#  %%
 # visualize
 import matplotlib.pyplot as plt
 
+plt.close()
 fig, axes = plt.subplots(1, num_images, figsize=(20, 20))
 for i in range(num_images):
     axes[i].imshow(images_to_be_evaluated[i])
     axes[i].axis("off")
-#%%
+# %%
 plt.savefig(
     os.path.join(
         save_path, f"generated_images-{''.join(chkpt_path.split('/')[-3:])}.png"
@@ -223,7 +226,7 @@ import matplotlib.pyplot as plt
 
 plt.bar(hist.keys(), hist.values())
 plt.savefig(os.path.join(save_path, f"histogram-training-set.png"))
-            
+
 plt.close()
 # %%
 # generate 10k images and evaluate them with the classifier and populate the histogram of the classified samples according to the classifier
@@ -256,8 +259,12 @@ print(generated_img_histogram)
 # suplot the histogram on the same as the previous one
 
 plt.bar(hist.keys(), hist.values())
-plt.bar(generated_img_histogram.keys(), generated_img_histogram.values())
-plt.savefig(os.path.join(save_path, f"histogram-generated-{''.join(chkpt_path.split('/')[-3:])}.png"))
+plt.bar(generated_img_histogram.keys(), generated_img_histogram.values(), alpha=0.5)
+plt.savefig(
+    os.path.join(
+        save_path, f"histogram-generated-{''.join(chkpt_path.split('/')[-3:])}.png"
+    )
+)
 plt.close()
 # %%
 # plot all the images 100 of a batch in a grid 10 x 10
@@ -268,7 +275,11 @@ for i in range(10):
     for j in range(10):
         axes[i, j].imshow(images_to_be_evaluated[i * 10 + j])
         axes[i, j].axis("off")
-plt.savefig(os.path.join(save_path, f"generated_images-{''.join(chkpt_path.split('/')[-3:])}.png"))
+plt.savefig(
+    os.path.join(
+        save_path, f"generated_images-{''.join(chkpt_path.split('/')[-3:])}.png"
+    )
+)
 plt.close()
 # %%
 
@@ -291,43 +302,127 @@ images_to_be_evaluated = (
 # plot all the images in a grid 10 x 10
 import matplotlib.pyplot as plt
 
-fig, axes = plt.subplots(10, 10, figsize=(20, 20))
-for i in range(10):
-    for j in range(10):
-        axes[i, j].imshow(images_to_be_evaluated[i * 10 + j])
+fig, axes = plt.subplots(8, 8, figsize=(20, 20))
+for i in range(8):
+    for j in range(8):
+        axes[i, j].imshow(images_to_be_evaluated[i * 8 + j])
         axes[i, j].axis("off")
 plt.show()
 plt.close()
+
+
 # %%
+def extract_features(model, images, layer_name):
+    """
+    Extracts features from a specified layer of the model for a batch of images.
+
+    Parameters:
+        model (torch.nn.Module): The pre-trained model.
+        images (torch.Tensor): A batch of images.
+        layer_name (str): The name of the layer from which to extract features.
+
+    Returns:
+        torch.Tensor: The extracted features.
+    """
+    features = None
+
+    def hook(module, input, output):
+        nonlocal features
+        features = output
+
+    # Attach the hook to the specified layer
+    layer = dict([*model.named_modules()])[layer_name]
+    handle = layer.register_forward_hook(hook)
+
+    # Pass the images through the model
+    with torch.no_grad():
+        model(images)
+
+    # Remove the hook
+    handle.remove()
+
+    return features
+
+
+# Get all module names
+module_names = [name for name, _ in wr.named_modules()]
+
+# The penultimate layer will be the second last item in this list
+penultimate_layer_name = module_names[-4]
+
+print(f"The penultimate layer name is: {penultimate_layer_name}")
+
+import torch
+
+# Assuming `images` is a numpy array, convert it to a PyTorch Tensor
+images_tensor = x
+
+# Ensure that the tensor is on the same device as the model (e.g., CPU or GPU)
+images_tensor = images_tensor.to(device)
+
+# Extract features from the penultimate layer
+features = extract_features(wr, images_tensor, penultimate_layer_name)
+
+# %%
+
 # I want to evaluate the most similar samples of the dataset to the generated images through the penultimate layer of the classifier
 
-for i, im in enumerate(x):
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+x = images_to_be_evaluated[:10]
+print(x.shape)
+# %%
+images_ds_all = {}
+for i, im in tqdm(enumerate(x)):
+    im = (
+        torch.from_numpy((im - 127.5) / 127.5)
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+        .to(device)
+        .float()
+    )
+    print("min im", im.min(), "max im", im.max())
+    print(im.shape)
+
     dists = []
-    emb_im = wr.penultimate_embedding(im.unsqueeze(0).to(device).float())
-
+    dist_dict = {}
+    images_ds = []
+    emb_im = extract_features(wr, im, penultimate_layer_name)
     for batch in test_dataloader:
-
         for image in batch:
-            emb = wr.penultimate_embedding(image.to(device).float().unsqueeze(0))
+            image_b = image.unsqueeze(0).to(device).float()
+            # cast image in [-1,1]
+            image_b = (image_b - 127.5) / 127.5
+            emb = extract_features(wr, image_b, penultimate_layer_name)
+            # Compute pairwise distance and take the mean
+            distance = torch.nn.functional.pairwise_distance(emb_im, emb).mean()
+            # dists.append(distance.item())
+            # images_ds.append(image)
+            dist_dict[image] = distance.item()
 
-            # evaluate the distance between the penultimate embedding of the generated image and the penultimate embedding of the dataset
-            distance = torch.nn.functional.pairwise_distance(emb_im, emb)
-            dists.append((distance, image.cpu()))
-            #  sort the distances
-            dists.sort(key=lambda x: x[0], reverse=True)
-            # get the top 10 images
-            dists = dists[:10]
-    # get all the values of the distances
-    ds = [d.item() for d, _ in dists]
-    images_ds = [i for _, i in dists]
-    # plot all the images in a grid 1 x 11
-    fig, axes = plt.subplots(1, 11, figsize=(20, 20))
-    axes[0].imshow(images_to_be_evaluated[i])
-    axes[0].axis("off")
-    for i, img in enumerate(images_ds):
+    for k, v in sorted(dist_dict.items(), key=lambda item: item[1])[:10]:
+        images_ds.append(k)
+        dists.append(v)
+    images_ds_all[i] = images_ds
+# %%
+plt.close()
+fig, axes = plt.subplots(len(images_ds_all.keys()), 11, figsize=(20, 20))
+for i, im in tqdm(enumerate(images_tensor[:10])):
+    # normalize the images from [-1,1] in [0, 255]
+    im = (im * 127.5 + 127.5).clamp(0, 255).to(torch.uint8)
+    axes[i, 0].imshow(im.squeeze(0).permute(1, 2, 0).cpu().numpy())
+    axes[i, 0].axis("off")
+    for j, img in enumerate(images_ds_all[i]):
+        axes[i, j + 1].imshow(img.squeeze(0).permute(1, 2, 0).cpu().numpy())
+        axes[i, j + 1].axis("off")
+plt.savefig(
+    os.path.join(
+        save_path,
+        f"most-similar-{''.join(chkpt_path.split('/')[-3:])}-{i}.png",
+    )
+)
+plt.close()
 
-        axes[i + 1].imshow(img.permute(1, 2, 0).cpu().numpy())
-        axes[i + 1].axis("off")
-    plt.savefig(os.path.join(save_path, f"classifier-most-similar-{''.join(chkpt_path.split('/')[-3:])}.png"))
-    plt.close()
+
 # %%

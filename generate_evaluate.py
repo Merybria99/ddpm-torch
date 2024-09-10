@@ -216,11 +216,25 @@ def main():
     args.num_batches = num_batches
     exp_name = os.path.basename(args.config_path)[:-5]
     folder_name = os.path.basename(args.chkpt_path)[:-3]
-    save_dir = os.path.join(args.save_dir, f"eval-{args.num_iterations}", exp_name, folder_name)
+    save_dir = os.path.join(args.save_dir, "eval", exp_name, folder_name)
+
+    metrics_path = f"{args.chkpt_dir}/logs/metrics{'-DDIM' if args.use_ddim else '' }-{args.num_iterations}.csv"
+    print(f"Metrics path: {metrics_path}")
+
+    # check if the file exists
+    epochs_computed = []
+    if os.path.exists(metrics_path):
+        # get the epochs already computed
+        with open(metrics_path, "r") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if row[0] != "epoch":
+                    epochs_computed.append(int(row[0]))
+    print(f"Epochs already computed: {epochs_computed}")
     for file in os.listdir(args.chkpt_dir):
         if file.endswith(".pt"):
             epoch = int(file.split("_")[-1].split(".")[0])
-            if (epoch % args.interval) != 0:
+            if (epoch % args.interval) != 0 or epoch in epochs_computed:
                 continue
         else:
             continue
@@ -248,7 +262,7 @@ def main():
 
         # load the dataset
         dataset_train = DATASET_DICT[args.dataset](
-            "/home/maria.briglia/data/ddpm-train", "train"
+            "/home/hl-fury/mariarosaria.briglia/ddpm-torch/data", "train"
         )
         torch.manual_seed(0)
         batch_size = 100
@@ -258,7 +272,7 @@ def main():
 
         os.makedirs(f"{args.chkpt_dir}/logs", exist_ok=True)
         with open(
-            f"{args.chkpt_dir}/logs/metrics-DDIM-{args.num_iterations}.csv", "a"
+            metrics_path, "a"
         ) as f:
             writer = csv.writer(f)
             writer.writerow(["epoch", "FID", "IS"])
@@ -288,7 +302,7 @@ def main():
             inception_score.update(x)
 
         with open(
-            f"{args.chkpt_dir}/logs/metrics-DDIM{args.num_iterations}.csv", "a"
+            metrics_path, "a"
         ) as f:
             writer = csv.writer(f)
             fid = fid.compute()
