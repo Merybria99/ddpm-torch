@@ -160,7 +160,7 @@ class GaussianDiffusion:
             model_mean, *_ = self.q_posterior_mean_var(x_0=pred_x_0, x_t=x_t, t=t)
         else:
             raise NotImplementedError(self.model_mean_type)
-        
+
         if return_pred:
             return model_mean, model_var, model_logvar, pred_x_0
         else:
@@ -187,7 +187,7 @@ class GaussianDiffusion:
         return_pred=False,
         generator=None,
     ):
-        #x_t.requires_grad_(True)
+        # x_t.requires_grad_(True)
         model_mean, _, model_logvar, pred_x_0 = self.p_mean_var(
             denoise_fn,
             x_t,
@@ -199,8 +199,6 @@ class GaussianDiffusion:
         nonzero_mask = (t > 0).reshape((-1,) + (1,) * (x_t.ndim - 1)).to(x_t)
         sample = model_mean + nonzero_mask * torch.exp(0.5 * model_logvar) * noise
         return (sample, pred_x_0) if return_pred else sample
-    
-   
 
     @torch.inference_mode()
     def p_sample(
@@ -221,12 +219,21 @@ class GaussianDiffusion:
             x_t = torch.empty(shape, device=device).normal_(generator=rng)
         else:
             x_t = noise.to(device)
-        interval = kwargs.get("interval", 1)
-        #print("interval: ", interval)
-        for ti in range(self.timesteps - 1, -1, -interval):
-            #print("time step: ", ti)
-            t.fill_(ti)
-            x_t = self.p_sample_step(denoise_fn, x_t, t, generator=rng)
+
+        performed_timesteps = kwargs.get("performed", None)
+        if performed_timesteps is not None:
+            timesteps = torch.linspace(0, self.timesteps-1, performed_timesteps).int()
+            # print("performed timesteps length: ", len(timesteps))
+            # reverse the timesteps
+            timesteps = timesteps.flip(0)
+            for ti in timesteps:
+                t.fill_(int(ti.item()))
+                x_t = self.p_sample_step(denoise_fn, x_t, t, generator=rng)
+
+        else:
+            for ti in range(self.timesteps - 1, -1, -1):
+                t.fill_(ti)
+                x_t = self.p_sample_step(denoise_fn, x_t, t, generator=rng)
         return x_t
 
     ## Poisoned sample generation
@@ -240,12 +247,13 @@ class GaussianDiffusion:
         generator=None,
         **kwargs,
     ):
-        #x_t.requires_grad_(True)
+        # x_t.requires_grad_(True)
         eps_attack = kwargs.get("eps_attack", 0.1)
         random_start = kwargs.get("random_start", False)
-        
+
         perturbation = (
-            torch.zeros_like(x_t, requires_grad=True, device=x_t.device) + eps_attack * torch.randn_like(x_t) 
+            torch.zeros_like(x_t, requires_grad=True, device=x_t.device)
+            + eps_attack * torch.randn_like(x_t)
             if not random_start
             else torch.randn_like(x_t, requires_grad=True, device=x_t.device)
         )
@@ -264,7 +272,7 @@ class GaussianDiffusion:
         nonzero_mask = (t > 0).reshape((-1,) + (1,) * (x_t.ndim - 1)).to(x_t)
         sample = model_mean + nonzero_mask * torch.exp(0.5 * model_logvar) * noise
         return (sample, pred_x_0) if return_pred else sample
-    
+
     def p_poisoned_sample(
         self,
         denoise_fn,
@@ -291,14 +299,13 @@ class GaussianDiffusion:
 
         for ti in range(self.timesteps - 1, -1, -1):
             t.fill_(ti)
-            
+
             print("time step: ", ti)
 
             x_t = self.p_poisoned_sample_step(denoise_fn, x_t, t, generator=rng)
             if ti in attack_steps:
                 print("Attacking time step: ", ti)
-                
-                
+
                 with torch.enable_grad():
                     x_t_poisoned = self.p_sample_step(
                         denoise_fn, x_t + perturbation, t, generator=rng

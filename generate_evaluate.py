@@ -15,6 +15,11 @@ from tqdm import tqdm
 import numpy as np
 import csv
 
+# set the seed
+torch.manual_seed(0)
+np.random.seed(0)
+
+
 def progress_monitor(total, counter):
     pbar = tqdm(total=total)
     while pbar.n < total:
@@ -65,7 +70,7 @@ def generate(rank, args, counter=0, **kwargs):
     device = torch.device(f"cuda:{rank}" if args.num_gpus > 1 else args.device)
     block_size = meta_config["model"].pop("block_size", 1)
     model = UNet(out_channels=in_channels, **meta_config["model"])
-    
+
     if block_size > 1:
         pre_transform = torch.nn.PixelUnshuffle(block_size)  # space-to-depth
         post_transform = torch.nn.PixelShuffle(block_size)  # depth-to-space
@@ -74,7 +79,7 @@ def generate(rank, args, counter=0, **kwargs):
     chkpt_dir = args.chkpt_dir
     chkpt_path = args.chkpt_path or os.path.join(chkpt_dir, f"ddpm_{dataset}.pt")
     print(f"Loading checkpoint from {chkpt_path}...")
-    
+
     folder_name = kwargs.get(
         "folder_name", os.path.basename(chkpt_path)[:-3]
     )  # truncated at file extension
@@ -135,6 +140,9 @@ def generate(rank, args, counter=0, **kwargs):
     if isinstance(counter, int):
         pbar = tqdm(total=local_num_batches)
 
+    # check if the reverse chain is needed
+    num_reverse = args.num_iterations if args.subsample_reverse_chain else None
+
     with ThreadPoolExecutor(max_workers=args.max_workers) as pool:
         for i in range(local_num_batches):
             if i == local_num_batches - 1:
@@ -144,6 +152,7 @@ def generate(rank, args, counter=0, **kwargs):
                 shape=shape,
                 device=device,
                 noise=torch.randn(shape, device=device),
+                performed=num_reverse,
             ).cpu()
             x = (
                 (x * 127.5 + 127.5)
@@ -183,6 +192,19 @@ def main():
     parser.add_argument("--max-workers", default=8, type=int)
     parser.add_argument("--num-gpus", default=1, type=int)
     parser.add_argument("--interval", default=50, type=int)
+
+    parser.add_argument(
+        "--subsample-reverse-chain",
+        action="store_true",
+        help="subsample the reverse chain",
+    )
+    parser.add_argument(
+        "--num-iterations",
+        type=int,
+        default=1000,
+        help="number of iterations for the reverse chain",
+    )
+
     args = parser.parse_args()
 
     world_size = args.world_size = args.num_gpus or 1
@@ -194,17 +216,17 @@ def main():
     args.num_batches = num_batches
     exp_name = os.path.basename(args.config_path)[:-5]
     folder_name = os.path.basename(args.chkpt_path)[:-3]
-    save_dir = os.path.join(args.save_dir, "eval", exp_name, folder_name)
+    save_dir = os.path.join(args.save_dir, f"eval-{args.num_iterations}", exp_name, folder_name)
     for file in os.listdir(args.chkpt_dir):
         if file.endswith(".pt"):
             epoch = int(file.split("_")[-1].split(".")[0])
             if (epoch % args.interval) != 0:
                 continue
-        else :
+        else:
             continue
         if file.startswith(folder_name) and file.endswith(".pt"):
             args.chkpt_path = os.path.join(args.chkpt_dir, file)
-                
+
         if not os.path.exists(save_dir):
             if world_size > 1:
                 mp.set_start_method("spawn")
@@ -214,10 +236,16 @@ def main():
                 ).start()
                 mp.spawn(generate, args=(args, counter), nprocs=world_size)
             else:
-                generate(0, args, exp_name=exp_name, folder_name=folder_name, save_dir=save_dir)
+                generate(
+                    0,
+                    args,
+                    exp_name=exp_name,
+                    folder_name=folder_name,
+                    save_dir=save_dir,
+                )
 
             print("Done for the generation!")
-        
+
         # load the dataset
         dataset_train = DATASET_DICT[args.dataset](
             "/home/maria.briglia/data/ddpm-train", "train"
@@ -227,25 +255,28 @@ def main():
         train_dataloader = torch.utils.data.DataLoader(
             dataset_train, batch_size=batch_size, shuffle=True
         )
-        
+
         os.makedirs(f"{args.chkpt_dir}/logs", exist_ok=True)
-        with open(f"{args.chkpt_dir}/logs/metrics-DDIM.csv", "a") as f:
+        with open(
+            f"{args.chkpt_dir}/logs/metrics-DDIM-{args.num_iterations}.csv", "a"
+        ) as f:
             writer = csv.writer(f)
-            writer.writerow(['epoch', 'FID', 'IS'])
+            writer.writerow(["epoch", "FID", "IS"])
 
         # instantiate the FID and IS
         from torchmetrics.image import FrechetInceptionDistance, InceptionScore
+
         print("Instanciating the FID and IS...")
         fid = FrechetInceptionDistance()
         inception_score = InceptionScore()
 
         # iterate over the dataset for 10k samples and compute the FID and IS
         tot_samples = args.total_size
-        for i, x in enumerate(train_dataloader): 
+        for i, x in enumerate(train_dataloader):
             if i * batch_size > tot_samples:
                 break
             fid.update(x, real=True)
-            
+
         # iterate over the generated samples and compute the FID and IS
         for image in os.listdir(save_dir):
             if not image.endswith(".png"):
@@ -255,19 +286,22 @@ def main():
             x = torch.tensor(np.array(x)).permute(2, 0, 1).unsqueeze(0)
             fid.update(x, real=False)
             inception_score.update(x)
-        
-        with open(f"{args.chkpt_dir}/logs/metrics-DDIM.csv", "a") as f:
+
+        with open(
+            f"{args.chkpt_dir}/logs/metrics-DDIM{args.num_iterations}.csv", "a"
+        ) as f:
             writer = csv.writer(f)
             fid = fid.compute()
             inception_score = inception_score.compute()[0]
             print(f"Epoch {epoch} - FID: {fid} - IS: {inception_score}")
-            
+
             writer.writerow([epoch, fid, inception_score])
         # delete the generated samples
         for image in os.listdir(save_dir):
             os.remove(os.path.join(save_dir, image))
         os.rmdir(save_dir)
         print("Done for the evaluation!")
+
 
 if __name__ == "__main__":
     main()
@@ -277,4 +311,3 @@ if __name__ == "__main__":
 command lines for launching generation:
 python generate_evaluate.py --config-path /home/hl-fury/mariarosaria.briglia/ddpm-torch/configs/cifar10.json --dataset cifar10 --total-size 10000  --use-ema --chkpt-dir /home/hl-fury/mariarosaria.briglia/ddpm-torch/models/adv-ddpm/L2/adv-post-2024-08-08T160539047657  --save-dir /home/hl-fury/mariarosaria.briglia/ddpm-torch/images/L2/images-evaluation --batch-size 512 
 """
-
