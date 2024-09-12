@@ -1,10 +1,17 @@
+#!/home/briglia/miniconda3/envs/advDM/bin/python3
 import json
 import os
 import tempfile
-from ddpm_torch import *
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from datetime import datetime
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append("/home/briglia/basefolder/advDM/ddpm-torch/ddim.py")
+sys.path.append("/home/briglia/basefolder/advDM/ddpm-torch/ddpm_torch.py")
+sys.path.append("/home/briglia/basefolder/advDM/ddpm-torch")
+from ddpm_torch import *
 from datetime import datetime
 from functools import partial
 from torch.distributed.elastic.multiprocessing import errors
@@ -46,7 +53,6 @@ def train(rank=0, args=None, temp_dir=""):
         args.config_path = os.path.join(args.config_dir, args.dataset + ".json")
     with open(args.config_path, "r") as f:
         meta_config = json.load(f)
-    #exp_name = os.path.basename(args.config_path)[:-5]
     exp_name = ''.join([args.exp_name, '-', datetime.now().strftime("%Y-%m-%dT%H%M%S%f")])
 
     # dataset basic info
@@ -152,13 +158,9 @@ def train(rank=0, args=None, temp_dir=""):
     logger(
         f"Effective batch-size is {train_config.batch_size} * {args.num_accum}"
         f" = {train_config.batch_size * args.num_accum}.")
-
-    # PyTorch's implementation of Adam differs slightly from TensorFlow in that
-    # the former follows Algorithm 1 as described in the paper by Kingma & Ba (2015) [1]
-    # while the latter adopts an alternative approach mentioned just before Section 2.1
-    # see also https://github.com/tensorflow/tensorflow/blob/v1.15.0/tensorflow/python/training/adam.py#L64-L69
+    
     optimizer = Adam(model.parameters(), lr=train_config.lr, betas=(train_config.beta1, train_config.beta2))
-    # lr_lambda is used to calculate the learning rate multiplicative factor at timestep t (starting from 0)
+    
     scheduler = lr_scheduler.LambdaLR(
         optimizer, lr_lambda=lambda t: min((t + 1) / train_config.warmup, 1.0)
     ) if train_config.warmup > 0 else None
@@ -230,6 +232,7 @@ def train(rank=0, args=None, temp_dir=""):
         adv_percentage=args.adv_percentage,
         model_architecture = args.architecture,        
         attack_norm = args.attack_norm if args.adv_percentage > 0 else None,
+        random_start=False,
     )
 
     if args.use_ddim:
@@ -336,7 +339,6 @@ def main():
     parser.add_argument("--rigid-launch", action="store_true", help="whether to use torch multiprocessing spawn")
     parser.add_argument("--num-gpus", default=1, type=int, help="number of gpus for distributed training")
     parser.add_argument("--dry-run", action="store_true", help="test-run till the first model update completes")
-    # /home/hl-fury/mariarosaria.briglia/ddpm-torch/models/celeb_a/celeba-0.3-2024-08-20T114341110230/celeba-0.3-2024-08-20T114341110230_370.pt
     parser.add_argument("--adv-percentage", default=1, type=float, help="percentage of adversarial examples in the training procedure")
     parser.add_argument("--architecture", default="unet", type=str, choices = model_instanciations.keys() ,help="model architecture to use")
     parser.add_argument("--attack-norm", default="inf", type=str, choices=["inf", "2"], help="norm to use for the adversarial attack")
@@ -351,16 +353,6 @@ def main():
         with tempfile.TemporaryDirectory() as temp_dir:
             mp.spawn(train, args=(args, temp_dir), nprocs=args.num_gpus)
     else:
-        """
-        As opposed to the case of rigid launch, distributed training now:
-        (*: elastic launch only; **: Slurm srun only)
-         *1. handles failures by restarting all the workers 
-         *2.1 assigns RANK and WORLD_SIZE automatically
-        **2.2 sets MASTER_ADDR & MASTER_PORT manually beforehand via environment variables
-         *3. allows for number of nodes change
-          4. uses TCP initialization by default
-        **5. supports multi-node training
-        """
         train(args=args)
 
 # %%python --config-path ./configs/cifar10.json --root /home/maria.briglia/ddpm_torch --exp-name flag --chkpt-dir  --image-dir 

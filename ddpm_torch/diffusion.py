@@ -416,14 +416,11 @@ class GaussianDiffusion:
 
         if noise is None:
             noise = torch.randn_like(x_0)
+            
 
         x_t = self.q_sample(
             x_0, t, noise=noise
         )  # x_t = (sqrt_alpha) * x_0 + (1-sqrt(alpha)) * noise
-
-        # calculate the loss
-        # kl: weighted
-        # mse: unweighted
         if self.loss_type == "kl":
             losses = self._loss_term_bpd(
                 denoise_fn,
@@ -443,6 +440,7 @@ class GaussianDiffusion:
                     target = x_0
                 elif self.model_mean_type == "eps":
                     target = noise
+                    # target = noise - delta.clone().detach() if delta is not None else noise
                 else:
                     raise NotImplementedError(self.model_mean_type)
                 model_out = denoise_fn(x_t, t)
@@ -459,8 +457,6 @@ class GaussianDiffusion:
                 else:
                     raise NotImplementedError(self.model_mean_type)
 
-                # print("target mean value: ", target.mean())
-                # print("target delta value: ", target_delta.mean())
                 losses = flat_mean(
                     ((target - pred_noise) + (target_delta - pred_delta)).pow(2)
                 )
