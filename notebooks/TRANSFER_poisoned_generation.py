@@ -1,6 +1,12 @@
+# %%
 import json
 import math
 import os
+import sys
+
+sys.path.append("/home/hl-fury/mariarosaria.briglia/ddpm-torch/ddpm_torch")
+sys.path.append("/home/hl-fury/mariarosaria.briglia/ddpm-torch/")
+
 import time
 import torch
 import torch.multiprocessing as mp
@@ -22,7 +28,7 @@ def progress_monitor(total, counter):
         time.sleep(0.1)
 
 
-def generate(rank, args, counter=0):
+def generate_poisoned(rank, args, counter=0):
     assert isinstance(counter, (Synchronized, int))
 
     is_leader = rank == 0
@@ -63,42 +69,76 @@ def generate(rank, args, counter=0):
     device = torch.device(f"cuda:{rank}" if args.num_gpus > 1 else args.device)
     block_size = meta_config["model"].pop("block_size", 1)
     model = UNet(out_channels=in_channels, **meta_config["model"])
+    ref_model = UNet(out_channels=in_channels, **meta_config["model"])
     if block_size > 1:
         pre_transform = torch.nn.PixelUnshuffle(block_size)  # space-to-depth
         post_transform = torch.nn.PixelShuffle(block_size)  # depth-to-space
         model = ModelWrapper(model, pre_transform, post_transform)
+        ref_model = ModelWrapper(ref_model, pre_transform, post_transform)
     model.to(device)
+    ref_model.to(device)
+    ref_path = (
+        "/home/hl-fury/mariarosaria.briglia/ddpm-torch/notebooks/DDPM_cifar10_2040.pt"
+    )
     chkpt_dir = args.chkpt_dir
     chkpt_path = args.chkpt_path or os.path.join(chkpt_dir, f"ddpm_{dataset}.pt")
     folder_name = os.path.basename(chkpt_path)[:-3]  # truncated at file extension
     use_ema = meta_config["train"].get("use_ema", args.use_ema)
 
     state_dict = torch.load(chkpt_path, map_location=device)
+    ref_state_dict = torch.load(ref_path, map_location=device)
     try:
         if use_ema:
             state_dict = state_dict["ema"]["shadow"]
         else:
             state_dict = state_dict["model"]
+
         print("Loading checkpoint...", end=" ")
     except KeyError:
         print("Not a valid checkpoint!")
         print("Try loading checkpoint directly as model weights...", end=" ")
+        
+    try:
+        if use_ema:
+            ref_state_dict = ref_state_dict["ema"]["shadow"]
+        else:
+            ref_state_dict = ref_state_dict["model"]
+
+        print("Loading checkpoint...", end=" ")
+    except KeyError:
+        print("Not a valid checkpoint!")
+        print("Try loading checkpoint directly as model weights...", end=" ")
+    
+
 
     for k in list(state_dict.keys()):
         if k.startswith("module."):  # state_dict of DDP
             state_dict[k.split(".", maxsplit=1)[1]] = state_dict.pop(k)
+            ref_state_dict[k.split(".", maxsplit=1)[1]] = ref_state_dict.pop(k)
 
     try:
         model.load_state_dict(state_dict)
         del state_dict
         print("succeeded!")
+        ref_model.load_state_dict(ref_state_dict)
+        del ref_state_dict
+        print("succeeded!")
+
     except RuntimeError:
         model.load_state_dict(state_dict)
         print("failed!")
         exit(1)
+        ref_model.load_state_dict(ref_state_dict)
+        print("failed!")
+        exit(1)
 
     model.eval()
+    ref_model.eval()
     for p in model.parameters():
+        if p.requires_grad:
+            p.requires_grad_(False)
+
+    for p in ref_model.parameters():
         if p.requires_grad:
             p.requires_grad_(False)
 
@@ -116,8 +156,12 @@ def generate(rank, args, counter=0):
     shape = (batch_size,) + input_shape
 
     def save_image(arr):
+        save_path = f"{save_dir}_pois_{args.attack_percentage}"
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
         with Image.fromarray(arr, mode="RGB") as im:
-            im.save(f"{save_dir}/{uuid.uuid4()}.png")
+            im.save(f"{save_path}/{uuid.uuid4()}.png")
 
     if torch.backends.cudnn.is_available():  # noqa
         torch.backends.cudnn.benchmark = True  # noqa
@@ -130,13 +174,25 @@ def generate(rank, args, counter=0):
         for i in range(local_num_batches):
             if i == local_num_batches - 1:
                 shape = (local_total_size - i * batch_size, 3, image_res, image_res)
-            x = diffusion.p_poisoned_sample(
+            x, all_perturbations = diffusion.p_poisoned_sample(
+                ref_model,
+                shape=shape,
+                device=device,
+                seed=args.seed,
+                percentage_attack=args.attack_percentage,
+                noise=torch.randn(shape, device=device),
+                return_perturbation=True,
+            )
+
+            x = diffusion.p_sample(
                 model,
                 shape=shape,
                 device=device,
-                percentage_attack=args.attack_percentage,
+                seed=args.seed,
                 noise=torch.randn(shape, device=device),
+                prev_perturbation=all_perturbations,
             ).cpu()
+
             x = (
                 (x * 127.5 + 127.5)
                 .round()
@@ -153,18 +209,31 @@ def generate(rank, args, counter=0):
                 pbar.update(1)
 
 
+# %%
 def main():
     parser = ArgumentParser()
     parser.add_argument(
         "--config-path", type=str, help="path to the configuration file"
     )
     parser.add_argument("--dataset", choices=DATASET_DICT.keys(), default="cifar10")
-    parser.add_argument("--batch-size", default=128, type=int)
-    parser.add_argument("--total-size", default=50000, type=int)
-    parser.add_argument("--config-dir", default="./configs", type=str)
-    parser.add_argument("--chkpt-dir", default="./chkpts", type=str)
-    parser.add_argument("--chkpt-path", default="", type=str)
-    parser.add_argument("--save-dir", default="./images", type=str)
+    parser.add_argument("--batch-size", default=10, type=int)
+    parser.add_argument("--total-size", default=10, type=int)
+    parser.add_argument(
+        "--config-dir",
+        default="/home/hl-fury/mariarosaria.briglia/ddpm-torch/configs",
+        type=str,
+    )
+    parser.add_argument(
+        "--chkpt-dir",
+        default="/home/hl-fury/mariarosaria.briglia/ddpm-torch/models/ddpm/UNet/cifar10",
+        type=str,
+    )
+    parser.add_argument(
+        "--chkpt-path",
+        default="/home/hl-fury/mariarosaria.briglia/ddpm-torch/models/adv-ddpm/L2/UNet/cifar10/cifar10_400.pt",
+        type=str,
+    )
+    parser.add_argument("--save-dir", default="./images_L2", type=str)
     parser.add_argument("--device", default="cuda:0", type=str)
     parser.add_argument("--use-ema", action="store_true")
     parser.add_argument("--use-ddim", action="store_true")
@@ -174,8 +243,11 @@ def main():
     parser.add_argument("--suffix", default="", type=str)
     parser.add_argument("--max-workers", default=8, type=int)
     parser.add_argument("--num-gpus", default=1, type=int)
-    parser.add_argument("--attack-percentage", required=True, type=float)
-    args = parser.parse_args()
+
+    parser.add_argument("--attack-percentage", default=0.1, type=float)
+
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_known_args()[0]
 
     world_size = args.world_size = args.num_gpus or 1
     local_total_size = args.local_total_size = args.total_size // world_size
@@ -184,6 +256,7 @@ def main():
     num_batches = math.ceil((local_total_size + 1) / batch_size) * remainder
     num_batches += math.ceil(local_total_size / batch_size) * (world_size - remainder)
     args.num_batches = num_batches
+    print("attack percentage: ", args.attack_percentage)
 
     if world_size > 1:
         mp.set_start_method("spawn")
@@ -191,17 +264,21 @@ def main():
         mp.Process(
             target=progress_monitor, args=(num_batches, counter), daemon=True
         ).start()
-        mp.spawn(generate, args=(args, counter), nprocs=world_size)
+        mp.spawn(generate_poisoned, args=(args, counter), nprocs=world_size)
     else:
-        generate(0, args)
+        generate_poisoned(0, args)
+
+    return f"{args.save_dir}_pois_{args.attack_percentage}"
 
 
 if __name__ == "__main__":
-    main()
+    # define a argument to pass the attack percentage
 
+    from torchmetrics.image import FrechetInceptionDistance, InceptionScore
 
-"""
-command lines for launching generation:
-- python generate.py --config-path /home/maria.briglia/AdvTrain/ddpm-torch/configs/cifar10.json --dataset cifar10 --total-size 50000  --use-ema --chkpt-path /home/maria.briglia/data/ddpm-train/chkpts/cifar10/cifar10_480.pt  --save-dir /home/maria.briglia/data/ddpm-train/cifar10-images --batch-size 512
+    for a_p in [0.1, 0.2, 0.3, 0.4, 0.5]:
+        sys.argv.append(f"--attack-percentage={a_p}")
+        images_path = main()
+        sys.argv.pop()
 
-"""
+# %%

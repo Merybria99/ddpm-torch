@@ -58,3 +58,4 @@ assets/toy/gaussian25_true.jpg
 assets/toy/swissroll_gen.jpg
 assets/toy/swissroll_train.webp
 assets/toy/swissroll_true.jpg
+models/*
