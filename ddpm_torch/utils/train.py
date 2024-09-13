@@ -247,7 +247,8 @@ class Trainer:
                     delta=adv_delta,
                 ).mean()
                 grad = torch.autograd.grad(adv_loss, perturbation)[0]
-
+                
+            perturbation = perturbation.detach()
             if self.attack_norm == "inf":
                 perturbation += epsilon * torch.sign(grad)
             elif self.attack_norm == "2":
