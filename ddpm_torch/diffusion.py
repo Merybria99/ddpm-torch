@@ -406,8 +406,36 @@ class GaussianDiffusion:
         decoder_nll = flat_mean(decoder_nll) / math.log(2.0)
         output = torch.where(t.to(kl.device) > 0, kl, decoder_nll)
         return (output, pred_x_0) if return_pred else output
+    
+    def train_losses(self, denoise_fn, x_0, t, noise=None):
+        if noise is None:
+            noise = torch.randn_like(x_0)
+        x_t = self.q_sample(x_0, t, noise=noise)
 
-    def train_losses(self, denoise_fn, x_0, t, noise=None, delta=None):
+        # calculate the loss
+        # kl: weighted
+        # mse: unweighted
+        if self.loss_type == "kl":
+            losses = self._loss_term_bpd(
+                denoise_fn, x_0=x_0, x_t=x_t, t=t, clip_denoised=False, return_pred=False)
+        elif self.loss_type == "mse":
+            assert self.model_var_type != "learned"
+            if self.model_mean_type == "mean":
+                target = self.q_posterior_mean_var(x_0=x_0, x_t=x_t, t=t)[0]
+            elif self.model_mean_type == "x_0":
+                target = x_0
+            elif self.model_mean_type == "eps":
+                target = noise
+            else:
+                raise NotImplementedError(self.model_mean_type)
+            model_out = denoise_fn(x_t, t)
+            losses = flat_mean((target - model_out).pow(2))
+        else:
+            raise NotImplementedError(self.loss_type)
+
+        return losses
+    
+    def train_losses_attack(self, denoise_fn, x_0, t, noise=None, delta=None):
         architecture = (
             denoise_fn.architecture_name
             if hasattr(denoise_fn, "architecture_name")

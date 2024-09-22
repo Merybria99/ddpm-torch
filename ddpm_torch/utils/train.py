@@ -89,10 +89,12 @@ class Trainer:
         model_architecture="unet",
         attack_norm="inf",
         random_start=False,
+        attack=None,
     ):
         self.random_start = random_start
         print("attack norm : ", attack_norm)
         print("random start : ", random_start)
+        self.attack = attack
         self.model = model
         self.optimizer = optimizer
         self.diffusion = diffusion
@@ -144,7 +146,7 @@ class Trainer:
     def timesteps(self):
         return self.diffusion.timesteps
 
-    def get_input(self, x, delta=None):
+    def get_input_attack(self, x, delta=None):
         x = x.to(self.device)
 
         input_dict = {
@@ -161,7 +163,26 @@ class Trainer:
         }
         return input_dict
 
-    def loss(self, x, inputs=None):
+    def get_input(self, x):
+        x = x.to(self.device)
+        return {
+            "x_0": x,
+            "t": torch.empty(
+                (x.shape[0],), dtype=torch.int64, device=self.device
+            ).random_(to=self.timesteps, generator=self.generator),
+            "noise": torch.empty_like(x).normal_(generator=self.generator),
+        }
+
+    def loss(self, x, verbose=False):
+        all_inputs = self.get_input(x)
+        loss = self.diffusion.train_losses(self.model, **all_inputs)
+        assert loss.shape == (x.shape[0],)
+        if verbose:
+            return loss, all_inputs
+        else:
+            return loss
+
+    def loss_attack(self, x, inputs=None):
         if inputs is None:
             inputs = self.get_input(x)
 
@@ -173,100 +194,15 @@ class Trainer:
         assert loss.shape == (x.shape[0],)
         return loss
 
-    def loss_explicit(self, x, t=None, noise=None, delta=None):
+    def loss_explicit(self, x, t=None, noise=None):
         loss = self.diffusion.train_losses(
-            denoise_fn=self.model, x_0=x, t=t, noise=noise, delta=delta
+            denoise_fn=self.model, x_0=x, t=t, noise=noise
         )
         assert loss.shape == (x.shape[0],)
         return loss
 
-    def step(self, x, global_steps=1, adv_percentage=1, epsilon=8 / 255):
-        # get inputs for inference, the delta is set to None so that in output I will have a zeros tensor
-        inputs = self.get_input(x, delta=None)
-        x0, timesteps, noise, delta = (
-            inputs["x_0"],
-            inputs["t"],
-            inputs["noise"],
-            inputs["delta"],
-        )
-
-        # from data tensor to split the clean and adversarial examples
-        clean_x, adv_x = torch.split(
-            x0,
-            [int(x.shape[0] * (1 - adv_percentage)), int(x.shape[0] * adv_percentage)],
-            dim=0,
-        )
-        clean_timesteps, adv_timesteps = torch.split(
-            timesteps,
-            [
-                int(timesteps.shape[0] * (1 - adv_percentage)),
-                int(timesteps.shape[0] * adv_percentage),
-            ],
-            dim=0,
-        )
-        clean_noise, adv_noise = torch.split(
-            noise,
-            [
-                int(noise.shape[0] * (1 - adv_percentage)),
-                int(noise.shape[0] * adv_percentage),
-            ],
-            dim=0,
-        )
-        _, adv_delta = torch.split(
-            delta,
-            [
-                int(delta.shape[0] * (1 - adv_percentage)),
-                int(delta.shape[0] * adv_percentage),
-            ],
-            dim=0,
-        )
-        # adversarial attack
-        if adv_percentage > 0:
-            with torch.enable_grad():
-                perturbation = (
-                    torch.zeros_like(
-                        adv_noise,
-                        dtype=torch.float32,
-                        device=self.device,
-                        requires_grad=True,
-                    )
-                    if not self.random_start
-                    else torch.randn_like(
-                        adv_noise,
-                        dtype=torch.float32,
-                        device=self.device,
-                        requires_grad=True,
-                    )
-                    * 1e-3
-                )
-
-                adv_loss = self.loss_explicit(
-                    x=adv_x,
-                    t=adv_timesteps,
-                    noise=adv_noise + perturbation,
-                    delta=adv_delta,
-                ).mean()
-                grad = torch.autograd.grad(adv_loss, perturbation)[0]
-                
-            perturbation = perturbation.detach()
-            if self.attack_norm == "inf":
-                perturbation += epsilon * torch.sign(grad)
-            elif self.attack_norm == "2":
-                perturbation += (grad.detach() / grad.detach().norm()) * epsilon
-
-        # concat clean and adversarial examples
-        x = torch.cat((clean_x, adv_x), dim=0)
-        timesteps = torch.cat((clean_timesteps, adv_timesteps), dim=0)
-        noise = torch.cat((clean_noise, adv_noise), dim=0)
-
-        # # shuffle the examples
-        # perm = torch.randperm(x.shape[0])
-        # x = x[perm]
-        # timesteps = timesteps[perm]
-        # noise = noise[perm]
-
-        loss = self.loss_explicit(x=x, t=timesteps, noise=noise, delta=None).mean()
-
+    def step(self, x, global_steps=1):
+        loss = self.loss(x).mean()
         loss.div(self.num_accum).backward()  # average over accumulated mini-batches
         if global_steps % self.num_accum == 0:
             # gradient clipping by global norm
@@ -285,6 +221,72 @@ class Trainer:
             dist.reduce(loss, dst=0, op=dist.ReduceOp.SUM)  # synchronize losses
             loss.div_(self.world_size)
         self.stats.update(x.shape[0], loss=loss.item() * x.shape[0])
+
+    def step_attack(
+        self, x, global_steps=1, adv_percentage=1, epsilon=8 / 255, attack="NSR"
+    ):
+        loss_DM, all_inputs = self.loss(x, verbose=True)
+        loss_DM = loss_DM.mean()
+        l = np.random.uniform(0.1, 10)
+        beta = np.random.uniform(0.5, 8)
+
+        noise = all_inputs["noise"]
+        timesteps = all_inputs["t"]
+        x0 = all_inputs["x_0"]
+
+        if attack == "NSR":
+            # sample random noise
+            noise_adv = (
+                torch.randn_like(x)
+                .clamp(-beta * epsilon, beta * epsilon)
+                .to(self.device)
+            )
+            noise_adv = noise.clone().detach() + noise_adv
+
+            x0_adv = self.diffusion.q_sample(x_0=x0, t=timesteps, noise=noise_adv)
+            loss_adv = self.loss_explicit(
+                x=x0_adv, t=timesteps, noise=noise_adv
+            ).mean()
+            loss_DM = loss_DM + l * loss_adv
+
+        elif attack == "NSR-post":
+            with torch.enable_grad():
+                noise_adv = noise.clone().detach().requires_grad_(True)
+                x0_adv = self.diffusion.q_sample(x_0=x0, t=timesteps, noise=noise_adv)
+                loss_adv = self.loss_explicit(
+                    x=x0_adv, t=timesteps, noise=noise_adv
+                ).mean()
+                delta = torch.autograd.grad(loss_adv, noise_adv, create_graph=True)[0]
+                print("delta norm : ", delta.norm())
+                noise_adv = (
+                    noise.clone().detach() + epsilon * delta.detach() / delta.norm(p=2)
+                )
+                x0_adv = self.diffusion.q_sample(x_0=x0, t=timesteps, noise=noise_adv)
+                loss_adv = self.loss_explicit(
+                    x=x0_adv, t=timesteps, noise=noise_adv
+                ).mean()
+                loss_DM = loss_DM + l * loss_adv
+        else:
+            raise ValueError(f"Attack {attack} not recognized")
+
+        loss_DM.div(self.num_accum).backward()  # average over accumulated mini-batches
+        if global_steps % self.num_accum == 0:
+            # gradient clipping by global norm
+            # Note: In the official TF1.15+TPU implementation (clip_by_global_norm + CrossShardOptimizer)
+            # the gradient clipping operation is performed at shard level (i.e., TPU core or device level)
+            # see also https://github.com/tensorflow/tensorflow/blob/v1.15.0/tensorflow/python/tpu/tpu_optimizer.py#L114-L118
+            nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_norm)
+            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
+            # adjust learning rate every step (e.g. warming up)
+            self.scheduler.step()
+            if self.use_ema and hasattr(self.ema, "update"):
+                self.ema.update()
+        loss_DM = loss_DM.detach()
+        if self.distributed:
+            dist.reduce(loss_DM, dst=0, op=dist.ReduceOp.SUM)  # synchronize losses
+            loss_DM.div_(self.world_size)
+        self.stats.update(x.shape[0], loss=loss_DM.item() * x.shape[0])
 
     def get_scales(self, x0, timesteps):
         """The function returns the scales for the diffusion process at
@@ -366,14 +368,22 @@ class Trainer:
                 disable=not self.is_leader,
             ) as t:
                 for i, x in enumerate(t):
+
                     if isinstance(x, (list, tuple)):
                         x = x[0]  # unconditional model -> discard labels
                     global_steps += 1
-                    self.step(
-                        x.to(self.device),
-                        global_steps=global_steps,
-                        adv_percentage=self.adv_percentage,
-                    )
+                    if self.attack is None:
+                        self.step(
+                            x.to(self.device),
+                            global_steps=global_steps,
+                        )
+                    else:
+                        self.step_attack(
+                            x.to(self.device),
+                            global_steps=global_steps,
+                            adv_percentage=self.adv_percentage,
+                            attack=self.attack,
+                        )
                     t.set_postfix(self.current_stats)
                     results.update(self.current_stats)
 
