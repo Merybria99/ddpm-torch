@@ -13,6 +13,7 @@ from functools import partial
 from contextlib import nullcontext
 import wandb
 import numpy as np
+import math 
 
 
 class DummyScheduler:
@@ -92,8 +93,6 @@ class Trainer:
         attack=None,
     ):
         self.random_start = random_start
-        print("attack norm : ", attack_norm)
-        print("random start : ", random_start)
         self.attack = attack
         self.model = model
         self.optimizer = optimizer
@@ -225,60 +224,53 @@ class Trainer:
     def step_attack(
         self, x, global_steps=1, adv_percentage=1, epsilon=8 / 255, attack="NSR"
     ):
-        loss_DM, all_inputs = self.loss(x, verbose=True)
-        loss_DM = loss_DM.mean()
-        l = np.random.uniform(0.1, 10)
-        beta = np.random.uniform(0.5, 8)
-
+        all_inputs = self.get_input(x)
         noise = all_inputs["noise"]
         timesteps = all_inputs["t"]
-        x0 = all_inputs["x_0"]
-
+        x0 = all_inputs["x_0"] 
+        
+        l = np.random.uniform(0.1, 10)
+        beta = np.random.uniform(0.5, 2)
+        pred = self.model(x0, timesteps)
+        loss_DM_1 = self.diffusion.train_losses(self.model, **all_inputs).mean()
+        
         if attack == "NSR":
-            # sample random noise
-            noise_adv = (
-                torch.randn_like(x)
-                .clamp(-beta * epsilon, beta * epsilon)
-                .to(self.device)
-            )
-            noise_adv = noise.clone().detach() + noise_adv
-
-            x0_adv = self.diffusion.q_sample(x_0=x0, t=timesteps, noise=noise_adv)
-            loss_adv = self.loss_explicit(
-                x=x0_adv, t=timesteps, noise=noise_adv
-            ).mean()
-            loss_DM = loss_DM + l * loss_adv
+            delta = torch.randn_like(noise, device=self.device)
+            delta = delta.clamp(-epsilon * beta, epsilon * beta).to(self.device)
+            noise_adv = noise.clone().detach() + delta            
+            loss_DM_2 = self.diffusion.train_loss_NSR(self.model, x0, timesteps, noise, pred, delta).mean()
+            loss_DM =loss_DM_1 + l * loss_DM_2
 
         elif attack == "NSR-post":
-            with torch.enable_grad():
-                noise_adv = noise.clone().detach().requires_grad_(True)
-                x0_adv = self.diffusion.q_sample(x_0=x0, t=timesteps, noise=noise_adv)
+            delta = torch.zeros_like(noise, device=self.device).requires_grad_(True)
+            noise_adv = noise.clone().detach() + delta
+            
+            with torch.enable_grad(): 
+                
                 loss_adv = self.loss_explicit(
-                    x=x0_adv, t=timesteps, noise=noise_adv
+                    x=x0, t=timesteps, noise=noise_adv
                 ).mean()
-                delta = torch.autograd.grad(loss_adv, noise_adv, create_graph=True)[0]
-                print("delta norm : ", delta.norm())
-                noise_adv = (
-                    noise.clone().detach() + epsilon * delta.detach() / delta.norm(p=2)
-                )
-                x0_adv = self.diffusion.q_sample(x_0=x0, t=timesteps, noise=noise_adv)
-                loss_adv = self.loss_explicit(
-                    x=x0_adv, t=timesteps, noise=noise_adv
-                ).mean()
-                loss_DM = loss_DM + l * loss_adv
+                
+                delta = torch.autograd.grad(loss_adv, delta, create_graph=False, retain_graph=False )[0]
+                
+            print("delta norm : ", delta.norm())
+            delta = (delta.detach().sign() / delta.norm(p=2)) * math.sqrt(x0.shape[1]*x0.shape[2]*x0.shape[3])
+             
+            noise_adv = (
+                noise.clone().detach() + delta
+            )
+                   
+            loss_DM_2 = self.diffusion.train_loss_NSR(self.model, x0, timesteps, noise, pred, delta).mean()
+            loss_DM =loss_DM_1 + l * loss_DM_2
         else:
-            raise ValueError(f"Attack {attack} not recognized")
-
+            raise ValueError(f"Unknown attack: {attack}")     
+        
+        
         loss_DM.div(self.num_accum).backward()  # average over accumulated mini-batches
         if global_steps % self.num_accum == 0:
-            # gradient clipping by global norm
-            # Note: In the official TF1.15+TPU implementation (clip_by_global_norm + CrossShardOptimizer)
-            # the gradient clipping operation is performed at shard level (i.e., TPU core or device level)
-            # see also https://github.com/tensorflow/tensorflow/blob/v1.15.0/tensorflow/python/tpu/tpu_optimizer.py#L114-L118
             nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_norm)
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
-            # adjust learning rate every step (e.g. warming up)
             self.scheduler.step()
             if self.use_ema and hasattr(self.ema, "update"):
                 self.ema.update()
@@ -367,7 +359,7 @@ class Trainer:
                 desc=f"{e + 1}/{self.epochs} epochs",
                 disable=not self.is_leader,
             ) as t:
-                for i, x in enumerate(t):
+                for _, x in enumerate(t):
 
                     if isinstance(x, (list, tuple)):
                         x = x[0]  # unconditional model -> discard labels
@@ -412,8 +404,10 @@ class Trainer:
 
             if self.distributed:
                 dist.barrier()  # synchronize all processes here
-
-            wandb.log(results)
+            try:
+                wandb.log(results)
+            except AttributeError:
+                pass
 
     @property
     def trainees(self):

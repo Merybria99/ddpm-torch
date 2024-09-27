@@ -406,7 +406,7 @@ class GaussianDiffusion:
         decoder_nll = flat_mean(decoder_nll) / math.log(2.0)
         output = torch.where(t.to(kl.device) > 0, kl, decoder_nll)
         return (output, pred_x_0) if return_pred else output
-    
+
     def train_losses(self, denoise_fn, x_0, t, noise=None):
         if noise is None:
             noise = torch.randn_like(x_0)
@@ -417,7 +417,13 @@ class GaussianDiffusion:
         # mse: unweighted
         if self.loss_type == "kl":
             losses = self._loss_term_bpd(
-                denoise_fn, x_0=x_0, x_t=x_t, t=t, clip_denoised=False, return_pred=False)
+                denoise_fn,
+                x_0=x_0,
+                x_t=x_t,
+                t=t,
+                clip_denoised=False,
+                return_pred=False,
+            )
         elif self.loss_type == "mse":
             assert self.model_var_type != "learned"
             if self.model_mean_type == "mean":
@@ -434,66 +440,12 @@ class GaussianDiffusion:
             raise NotImplementedError(self.loss_type)
 
         return losses
-    
-    def train_losses_attack(self, denoise_fn, x_0, t, noise=None, delta=None):
-        architecture = (
-            denoise_fn.architecture_name
-            if hasattr(denoise_fn, "architecture_name")
-            else "unet"
-        )
 
-        if noise is None:
-            noise = torch.randn_like(x_0)
-            
-
-        x_t = self.q_sample(
-            x_0, t, noise=noise
-        )  # x_t = (sqrt_alpha) * x_0 + (1-sqrt(alpha)) * noise
-        if self.loss_type == "kl":
-            losses = self._loss_term_bpd(
-                denoise_fn,
-                x_0=x_0,
-                x_t=x_t,
-                t=t,
-                clip_denoised=False,
-                return_pred=False,
-            )
-        elif self.loss_type == "mse":
-            assert self.model_var_type != "learned"
-
-            if architecture == "unet":
-                if self.model_mean_type == "mean":
-                    target = self.q_posterior_mean_var(x_0=x_0, x_t=x_t, t=t)[0]
-                elif self.model_mean_type == "x_0":
-                    target = x_0
-                elif self.model_mean_type == "eps":
-                    target = noise
-                    # target = noise - delta.clone().detach() if delta is not None else noise
-                else:
-                    raise NotImplementedError(self.model_mean_type)
-                model_out = denoise_fn(x_t, t)
-                losses = flat_mean((target - model_out).pow(2))
-
-            elif architecture == "unet2h":
-                pred_noise, pred_delta = denoise_fn(x_t, t)
-                if self.model_mean_type == "x_0":
-                    target = x_0
-                    target_delta = delta
-                elif self.model_mean_type == "eps":
-                    target = noise
-                    target_delta = delta
-                else:
-                    raise NotImplementedError(self.model_mean_type)
-
-                losses = flat_mean(
-                    ((target - pred_noise) + (target_delta - pred_delta)).pow(2)
-                )
-
-            else:
-                raise NotImplementedError(architecture)
-
-        else:
-            raise NotImplementedError(self.loss_type)
+    def train_loss_NSR(self, denoise_fn, x_0, t, noise, clean_pred, delta):
+        x_t = self.q_sample(x_0, t, noise=noise)
+        target = clean_pred + delta
+        model_out = denoise_fn(x_t, t)
+        losses = flat_mean((target - model_out).pow(2))
 
         return losses
 

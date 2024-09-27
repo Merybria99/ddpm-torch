@@ -1,4 +1,3 @@
-#!/home/briglia/miniconda3/envs/advDM/bin/python3
 import json
 import os
 import tempfile
@@ -7,10 +6,6 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from datetime import datetime
 import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append("/home/briglia/basefolder/advDM/ddpm-torch/ddim.py")
-sys.path.append("/home/briglia/basefolder/advDM/ddpm-torch/ddpm_torch.py")
-sys.path.append("/home/briglia/basefolder/advDM/ddpm-torch")
 from ddpm_torch import *
 from datetime import datetime
 from functools import partial
@@ -280,12 +275,15 @@ def train(rank=0, args=None, temp_dir=""):
         "architecture": args.architecture,   
         "attack norm" : args.attack_norm,      
     }
-    if resume :
-        wandb_run_id = args.wandb_id
-        wandb.init(project=f"ddpm-{dataset}", name=exp_name, config=wandb_config_dict, resume='allow', id=wandb_run_id) 
-    else:
-        wandb.init(project=f"ddpm-{dataset}", name=exp_name, config=wandb_config_dict)
-    wandb.watch(model)
+    try:
+        if resume :
+            wandb_run_id = args.wandb_id
+            wandb.init(project=f"ddpm-{dataset}", name=exp_name, config=wandb_config_dict, resume='allow', id=wandb_run_id,  mode='offline') 
+        else:
+            wandb.init(project=f"ddpm-{dataset}", name=exp_name, config=wandb_config_dict, mode='offline')
+        wandb.watch(model)
+    except Exception as e:
+        logger(f"Error while initializing wandb: {e}")
 
     logger("Training starts...", flush=True)
     trainer.train(evaluator, chkpt_path=chkpt_path, image_dir=image_dir)
